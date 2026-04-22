@@ -1,0 +1,16 @@
+[package]
+name = "pycdt-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pycdt_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+robust = "1"
+pyo3 = { version = "0.24", features = ["extension-module"] }
+numpy = "0.24"
+
+[dev-dependencies]
+proptest = "1"

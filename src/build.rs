@@ -1,0 +1,824 @@
+use crate::geometry::{ensure_ccw, point_in_triangle, PointInTriangle};
+use crate::topology::{lawson_swapping, reorder_neighbors};
+use crate::triangulation::Triangulation;
+use crate::types::{Point, PointLocation, NO_NEIGHBOR};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
+    assert!(
+        !points.is_empty(),
+        "initialize_triangulation requires at least one point"
+    );
+
+    let mut min_x = points[0][0];
+    let mut min_y = points[0][1];
+    let mut max_x = points[0][0];
+    let mut max_y = points[0][1];
+
+    for point in &points[1..] {
+        min_x = min_x.min(point[0]);
+        min_y = min_y.min(point[1]);
+        max_x = max_x.max(point[0]);
+        max_y = max_y.max(point[1]);
+    }
+
+    let dx = max_x - min_x;
+    let dy = max_y - min_y;
+    let delta_max = dx.max(dy);
+    let mid_x = (min_x + max_x) / 2.0;
+    let mid_y = (min_y + max_y) / 2.0;
+
+    let p0 = [mid_x - 100.0 * delta_max, mid_y - delta_max];
+    let p1 = [mid_x, mid_y + 100.0 * delta_max];
+    let p2 = [mid_x + 100.0 * delta_max, mid_y - delta_max];
+
+    Triangulation {
+        points: vec![p0, p1, p2],
+        triangle_vertices: vec![[0, 1, 2]],
+        triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
+        constrained_edges: Default::default(),
+        num_super_triangle_points: 3,
+    }
+}
+
+pub fn remove_super_triangle(t: &mut Triangulation) {
+    let num_super = t.num_super_triangle_points;
+    if num_super == 0 {
+        return;
+    }
+
+    let keep: Vec<usize> = t
+        .triangle_vertices
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, vertices)| {
+            if vertices.iter().all(|&v| v >= num_super) {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut old_to_new = vec![NO_NEIGHBOR; t.triangle_vertices.len()];
+    for (new_idx, &old_idx) in keep.iter().enumerate() {
+        old_to_new[old_idx] = new_idx;
+    }
+
+    let new_triangle_vertices: Vec<[usize; 3]> = keep
+        .iter()
+        .map(|&old_idx| {
+            let [a, b, c] = t.triangle_vertices[old_idx];
+            [a - num_super, b - num_super, c - num_super]
+        })
+        .collect();
+
+    let new_triangle_neighbors: Vec<[usize; 3]> = keep
+        .iter()
+        .map(|&old_idx| {
+            let neighbors = t.triangle_neighbors[old_idx];
+            neighbors.map(|neighbor| {
+                if neighbor == NO_NEIGHBOR {
+                    NO_NEIGHBOR
+                } else {
+                    old_to_new[neighbor]
+                }
+            })
+        })
+        .collect();
+
+    t.triangle_vertices = new_triangle_vertices;
+    t.triangle_neighbors = new_triangle_neighbors;
+    t.points.drain(0..num_super);
+    t.num_super_triangle_points = 0;
+}
+
+pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
+    let mut t = initialize_triangulation(input_points);
+
+    let mut indexed_points: Vec<(usize, Point)> =
+        input_points.iter().copied().enumerate().collect();
+    indexed_points.sort_by(|a, b| {
+        a.1[0]
+            .partial_cmp(&b.1[0])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.1[1]
+                    .partial_cmp(&b.1[1])
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+
+    let mut sorted_to_original = vec![0usize; input_points.len()];
+    for (sorted_idx, (original_idx, point)) in indexed_points.into_iter().enumerate() {
+        sorted_to_original[sorted_idx] = original_idx;
+        t.points.push(point);
+        let point_idx = t.points.len() - 1;
+        insert_point(&mut t, point_idx);
+    }
+
+    remove_super_triangle(&mut t);
+
+    // Remap from sorted order back to original input order
+    let n = input_points.len();
+    let mut new_points = vec![[0.0; 2]; n];
+    for (sorted_idx, &original_idx) in sorted_to_original.iter().enumerate() {
+        new_points[original_idx] = t.points[sorted_idx];
+    }
+    t.points = new_points;
+
+    for vertices in &mut t.triangle_vertices {
+        for v in vertices.iter_mut() {
+            *v = sorted_to_original[*v];
+        }
+    }
+
+    t
+}
+
+pub fn find_containing_triangle(t: &Triangulation, point: &Point) -> PointLocation {
+    for (tri_idx, vertices) in t.triangle_vertices.iter().enumerate() {
+        let [v0, v1, v2] = *vertices;
+        let position = point_in_triangle(point, &t.points[v0], &t.points[v1], &t.points[v2]);
+
+        match position {
+            PointInTriangle::Inside => return PointLocation::Interior(tri_idx),
+            PointInTriangle::OnEdge0 => return PointLocation::OnEdge(tri_idx, 0),
+            PointInTriangle::OnEdge1 => return PointLocation::OnEdge(tri_idx, 1),
+            PointInTriangle::OnEdge2 => return PointLocation::OnEdge(tri_idx, 2),
+            PointInTriangle::Outside => continue,
+        }
+    }
+
+    PointLocation::NotFound
+}
+
+fn reorder_triangle_neighbors(
+    original_vertices: [usize; 3],
+    final_vertices: [usize; 3],
+    original_neighbors: [usize; 3],
+) -> [usize; 3] {
+    let mut final_neighbors = [NO_NEIGHBOR; 3];
+
+    for (i, vertex) in final_vertices.iter().enumerate() {
+        let original_idx = original_vertices
+            .iter()
+            .position(|&v| v == *vertex)
+            .expect("vertex must exist in original triangle ordering");
+        final_neighbors[i] = original_neighbors[original_idx];
+    }
+
+    final_neighbors
+}
+
+fn update_external_neighbor(
+    t: &mut Triangulation,
+    neighbor_idx: usize,
+    old_idx: usize,
+    new_idx: usize,
+) {
+    if neighbor_idx == NO_NEIGHBOR || old_idx == new_idx {
+        return;
+    }
+
+    reorder_neighbors(t, neighbor_idx, old_idx, new_idx);
+}
+
+fn insert_point_interior(t: &mut Triangulation, tri_idx: usize, point_idx: usize) {
+    let [v0, v1, v2] = t.triangle_vertices[tri_idx];
+    let [n0, n1, n2] = t.triangle_neighbors[tri_idx];
+
+    let tri_b = t.triangle_vertices.len();
+    let tri_c = tri_b + 1;
+
+    let tri_a_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v0, v1);
+        [a, b, c]
+    };
+    let tri_b_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v1, v2);
+        [a, b, c]
+    };
+    let tri_c_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v2, v0);
+        [a, b, c]
+    };
+
+    t.triangle_vertices[tri_idx] = tri_a_vertices;
+    t.triangle_vertices.push(tri_b_vertices);
+    t.triangle_vertices.push(tri_c_vertices);
+
+    t.triangle_neighbors[tri_idx] =
+        reorder_triangle_neighbors([point_idx, v0, v1], tri_a_vertices, [n2, tri_b, tri_c]);
+    t.triangle_neighbors.push(reorder_triangle_neighbors(
+        [point_idx, v1, v2],
+        tri_b_vertices,
+        [n0, tri_c, tri_idx],
+    ));
+    t.triangle_neighbors.push(reorder_triangle_neighbors(
+        [point_idx, v2, v0],
+        tri_c_vertices,
+        [n1, tri_idx, tri_b],
+    ));
+
+    update_external_neighbor(t, n0, tri_idx, tri_b);
+    update_external_neighbor(t, n1, tri_idx, tri_c);
+    update_external_neighbor(t, n2, tri_idx, tri_idx);
+
+    lawson_swapping(t, tri_idx, point_idx);
+    lawson_swapping(t, tri_b, point_idx);
+    lawson_swapping(t, tri_c, point_idx);
+}
+
+fn insert_point_on_edge(t: &mut Triangulation, tri_idx: usize, edge_idx: usize, point_idx: usize) {
+    let containing_vertices = t.triangle_vertices[tri_idx];
+    let containing_neighbors = t.triangle_neighbors[tri_idx];
+
+    let (shared_a_pos, shared_b_pos, opposite_pos) = match edge_idx {
+        0 => (0, 1, 2),
+        1 => (1, 2, 0),
+        2 => (2, 0, 1),
+        _ => panic!("invalid edge index {edge_idx}"),
+    };
+
+    let v1 = containing_vertices[shared_a_pos];
+    let v2 = containing_vertices[shared_b_pos];
+    let v3 = containing_vertices[opposite_pos];
+
+    let ty = containing_neighbors[shared_a_pos];
+    let tx = containing_neighbors[shared_b_pos];
+    let adjacent_tri = containing_neighbors[opposite_pos];
+    assert_ne!(
+        adjacent_tri, NO_NEIGHBOR,
+        "edge insertion requires adjacent triangle"
+    );
+
+    let adjacent_vertices = t.triangle_vertices[adjacent_tri];
+    let adjacent_neighbors = t.triangle_neighbors[adjacent_tri];
+    let v4 = adjacent_vertices
+        .iter()
+        .copied()
+        .find(|&v| v != v1 && v != v2)
+        .expect("adjacent triangle must contain opposite vertex");
+
+    let v1_pos_in_adjacent = adjacent_vertices
+        .iter()
+        .position(|&v| v == v1)
+        .expect("shared vertex must exist in adjacent triangle");
+    let v2_pos_in_adjacent = adjacent_vertices
+        .iter()
+        .position(|&v| v == v2)
+        .expect("shared vertex must exist in adjacent triangle");
+
+    let tw = adjacent_neighbors[v1_pos_in_adjacent];
+    let tz = adjacent_neighbors[v2_pos_in_adjacent];
+
+    let tri_b = t.triangle_vertices.len();
+    let tri_d = tri_b + 1;
+
+    let tri_a_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v3, v1);
+        [a, b, c]
+    };
+    let tri_b_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v3, v2);
+        [a, b, c]
+    };
+    let tri_c_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v1, v4);
+        [a, b, c]
+    };
+    let tri_d_vertices = {
+        let (a, b, c) = ensure_ccw(&t.points, point_idx, v2, v4);
+        [a, b, c]
+    };
+
+    t.triangle_vertices[tri_idx] = tri_a_vertices;
+    t.triangle_vertices[adjacent_tri] = tri_c_vertices;
+    t.triangle_vertices.push(tri_b_vertices);
+    t.triangle_vertices.push(tri_d_vertices);
+
+    t.triangle_neighbors[tri_idx] = reorder_triangle_neighbors(
+        [point_idx, v3, v1],
+        tri_a_vertices,
+        [tx, adjacent_tri, tri_b],
+    );
+    t.triangle_neighbors[adjacent_tri] =
+        reorder_triangle_neighbors([point_idx, v1, v4], tri_c_vertices, [tz, tri_d, tri_idx]);
+    t.triangle_neighbors.push(reorder_triangle_neighbors(
+        [point_idx, v3, v2],
+        tri_b_vertices,
+        [ty, tri_d, tri_idx],
+    ));
+    t.triangle_neighbors.push(reorder_triangle_neighbors(
+        [point_idx, v2, v4],
+        tri_d_vertices,
+        [tw, adjacent_tri, tri_b],
+    ));
+
+    update_external_neighbor(t, tx, tri_idx, tri_idx);
+    update_external_neighbor(t, ty, tri_idx, tri_b);
+    update_external_neighbor(t, tz, adjacent_tri, adjacent_tri);
+    update_external_neighbor(t, tw, adjacent_tri, tri_d);
+
+    lawson_swapping(t, tri_idx, point_idx);
+    lawson_swapping(t, tri_b, point_idx);
+    lawson_swapping(t, adjacent_tri, point_idx);
+    lawson_swapping(t, tri_d, point_idx);
+}
+
+/// Incrementally add new_points to an existing triangulation.
+/// Does NOT rebuild from scratch — inserts each new point incrementally.
+pub fn update_triangulation(t: &mut Triangulation, new_points: &[[f64; 2]]) {
+    for &point in new_points {
+        t.points.push(point);
+        let point_idx = t.points.len() - 1;
+        insert_point(t, point_idx);
+    }
+}
+
+pub fn insert_point(t: &mut Triangulation, point_idx: usize) {
+    let point = t.points[point_idx];
+
+    match find_containing_triangle(t, &point) {
+        PointLocation::Interior(tri_idx) => insert_point_interior(t, tri_idx, point_idx),
+        PointLocation::OnEdge(tri_idx, edge_idx) => {
+            insert_point_on_edge(t, tri_idx, edge_idx, point_idx)
+        }
+        PointLocation::NotFound => panic!("point {} not found in any triangle", point_idx),
+    }
+}
+
+pub fn build_polygons_from_edges(edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(v1, v2) in edges {
+        adj.entry(v1).or_default().push(v2);
+        adj.entry(v2).or_default().push(v1);
+    }
+
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut polygons: Vec<Vec<usize>> = Vec::new();
+
+    let mut starts: Vec<usize> = adj.keys().copied().collect();
+    starts.sort();
+
+    for start in starts {
+        if visited.contains(&start) {
+            continue;
+        }
+        let mut polygon = vec![start];
+        let mut current = start;
+        let mut prev: Option<usize> = None;
+        loop {
+            visited.insert(current);
+            let neighbors = adj
+                .get(&current)
+                .expect("invariant: current vertex must exist in adjacency map");
+            assert_eq!(
+                neighbors.len(),
+                2,
+                "Vertex {} does not have degree 2 after cleanup",
+                current
+            );
+            let next_v = if Some(neighbors[0]) != prev {
+                neighbors[0]
+            } else {
+                neighbors[1]
+            };
+            if next_v == start {
+                break;
+            }
+            polygon.push(next_v);
+            prev = Some(current);
+            current = next_v;
+        }
+        polygons.push(polygon);
+    }
+
+    polygons
+}
+
+pub fn polygon_area(points: &[Point], polygon: &[usize]) -> f64 {
+    let n = polygon.len();
+    let mut area = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let xi = points[polygon[i]][0];
+        let yi = points[polygon[i]][1];
+        let xj = points[polygon[j]][0];
+        let yj = points[polygon[j]][1];
+        area += xi * yj - xj * yi;
+    }
+    0.5 * area
+}
+
+pub fn remove_holes(t: &mut Triangulation, holes: &[Point]) {
+    if holes.is_empty() {
+        return;
+    }
+
+    let mut to_delete: HashSet<usize> = HashSet::new();
+
+    for seed in holes {
+        let start_tri = match find_containing_triangle(t, seed) {
+            PointLocation::Interior(idx) | PointLocation::OnEdge(idx, _) => idx,
+            PointLocation::NotFound => continue,
+        };
+
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        queue.push_back(start_tri);
+        to_delete.insert(start_tri);
+
+        while let Some(tri_idx) = queue.pop_front() {
+            let verts = t.triangle_vertices[tri_idx];
+            let neighbors = t.triangle_neighbors[tri_idx];
+
+            for i in 0..3 {
+                let neighbor = neighbors[i];
+                if neighbor == NO_NEIGHBOR || to_delete.contains(&neighbor) {
+                    continue;
+                }
+                // The shared edge between tri_idx and neighbor[i] is opposite vertex i:
+                // formed by vertices (i+1)%3 and (i+2)%3. Stop flood fill at constrained edges.
+                let va = verts[(i + 1) % 3];
+                let vb = verts[(i + 2) % 3];
+                if t.constrained_edges
+                    .contains(&Triangulation::edge_key(va, vb))
+                {
+                    continue;
+                }
+                to_delete.insert(neighbor);
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    if to_delete.is_empty() {
+        return;
+    }
+
+    let keep: Vec<usize> = (0..t.triangle_vertices.len())
+        .filter(|idx| !to_delete.contains(idx))
+        .collect();
+
+    let new_triangle_vertices: Vec<[usize; 3]> =
+        keep.iter().map(|&i| t.triangle_vertices[i]).collect();
+
+    // Build directed-edge → triangle map for neighbor reconstruction.
+    // For tri new_idx with vertices [a,b,c], the directed edge (b,c) is opposite vertex 0,
+    // (a,c) is opposite vertex 1, and (a,b) is opposite vertex 2.
+    let mut edge_to_tri: HashMap<(usize, usize), usize> = HashMap::new();
+    for (new_idx, &[a, b, c]) in new_triangle_vertices.iter().enumerate() {
+        edge_to_tri.insert((b, c), new_idx);
+        edge_to_tri.insert((a, c), new_idx);
+        edge_to_tri.insert((a, b), new_idx);
+    }
+
+    let new_triangle_neighbors: Vec<[usize; 3]> = new_triangle_vertices
+        .iter()
+        .map(|&[a, b, c]| {
+            let n0 = edge_to_tri.get(&(c, b)).copied().unwrap_or(NO_NEIGHBOR);
+            let n1 = edge_to_tri.get(&(c, a)).copied().unwrap_or(NO_NEIGHBOR);
+            let n2 = edge_to_tri.get(&(b, a)).copied().unwrap_or(NO_NEIGHBOR);
+            [n0, n1, n2]
+        })
+        .collect();
+
+    t.triangle_vertices = new_triangle_vertices;
+    t.triangle_neighbors = new_triangle_neighbors;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_neighbors_consistent(t: &Triangulation) {
+        for (i, &neighbors) in t.triangle_neighbors.iter().enumerate() {
+            for &n in &neighbors {
+                if n != NO_NEIGHBOR {
+                    assert!(
+                        t.triangle_neighbors[n].contains(&i),
+                        "triangle {} has neighbor {} but {} does not have {} as neighbor",
+                        i,
+                        n,
+                        n,
+                        i
+                    );
+                }
+            }
+        }
+    }
+
+    fn two_triangle_triangulation() -> Triangulation {
+        Triangulation {
+            points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            triangle_vertices: vec![[0, 1, 2], [0, 2, 3]],
+            triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, 1], [0, NO_NEIGHBOR, NO_NEIGHBOR]],
+            constrained_edges: Default::default(),
+            num_super_triangle_points: 0,
+        }
+    }
+
+    fn single_triangle_triangulation() -> Triangulation {
+        Triangulation {
+            points: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0], [0.5, 0.5]],
+            triangle_vertices: vec![[0, 1, 2]],
+            triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
+            constrained_edges: Default::default(),
+            num_super_triangle_points: 0,
+        }
+    }
+
+    fn edge_split_triangulation() -> Triangulation {
+        Triangulation {
+            points: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0], [2.0, 2.0], [1.0, 1.0]],
+            triangle_vertices: vec![[0, 1, 2], [3, 2, 1]],
+            triangle_neighbors: vec![[1, NO_NEIGHBOR, NO_NEIGHBOR], [0, NO_NEIGHBOR, NO_NEIGHBOR]],
+            constrained_edges: Default::default(),
+            num_super_triangle_points: 0,
+        }
+    }
+
+    fn assert_all_vertex_indices_in_range(t: &Triangulation, num_points: usize) {
+        for vertices in &t.triangle_vertices {
+            for &vertex in vertices {
+                assert!(
+                    vertex < num_points,
+                    "vertex index {} out of range for {} points",
+                    vertex,
+                    num_points
+                );
+            }
+        }
+    }
+
+    fn assert_delaunay(t: &Triangulation) {
+        for (tri_idx, neighbors) in t.triangle_neighbors.iter().enumerate() {
+            let [a_idx, b_idx, c_idx] = t.triangle_vertices[tri_idx];
+            let a = t.points[a_idx];
+            let b = t.points[b_idx];
+            let c = t.points[c_idx];
+
+            for (opposite_vertex_idx, &neighbor_idx) in neighbors.iter().enumerate() {
+                if neighbor_idx == NO_NEIGHBOR {
+                    continue;
+                }
+
+                let edge = [
+                    t.triangle_vertices[tri_idx][(opposite_vertex_idx + 1) % 3],
+                    t.triangle_vertices[tri_idx][(opposite_vertex_idx + 2) % 3],
+                ];
+                let opposite = t.triangle_vertices[neighbor_idx]
+                    .iter()
+                    .copied()
+                    .find(|vertex| !edge.contains(vertex))
+                    .expect("neighbor must have one opposite vertex");
+
+                assert!(
+                    crate::geometry::incircle(&a, &b, &c, &t.points[opposite]) <= 0.0,
+                    "triangle {} violates Delaunay condition with neighbor {}",
+                    tri_idx,
+                    neighbor_idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finds_point_inside_first_triangle() {
+        let triangulation = two_triangle_triangulation();
+        let point = [0.75, 0.25];
+
+        assert_eq!(
+            find_containing_triangle(&triangulation, &point),
+            PointLocation::Interior(0)
+        );
+    }
+
+    #[test]
+    fn finds_point_inside_second_triangle() {
+        let triangulation = two_triangle_triangulation();
+        let point = [0.25, 0.75];
+
+        assert_eq!(
+            find_containing_triangle(&triangulation, &point),
+            PointLocation::Interior(1)
+        );
+    }
+
+    #[test]
+    fn finds_point_on_shared_edge() {
+        let triangulation = two_triangle_triangulation();
+        let point = [0.5, 0.5];
+
+        assert_eq!(
+            find_containing_triangle(&triangulation, &point),
+            PointLocation::OnEdge(0, 2)
+        );
+    }
+
+    #[test]
+    fn returns_not_found_for_point_outside_all_triangles() {
+        let triangulation = two_triangle_triangulation();
+        let point = [1.5, 0.5];
+
+        assert_eq!(
+            find_containing_triangle(&triangulation, &point),
+            PointLocation::NotFound
+        );
+    }
+
+    #[test]
+    fn insert_point_interior_splits_one_triangle_into_three() {
+        let mut triangulation = single_triangle_triangulation();
+
+        insert_point_interior(&mut triangulation, 0, 3);
+
+        assert_eq!(triangulation.num_triangles(), 3);
+        assert_neighbors_consistent(&triangulation);
+    }
+
+    #[test]
+    fn insert_point_on_edge_splits_two_triangles_into_four() {
+        let mut triangulation = edge_split_triangulation();
+
+        insert_point_on_edge(&mut triangulation, 0, 1, 4);
+
+        assert_eq!(triangulation.num_triangles(), 4);
+        assert_neighbors_consistent(&triangulation);
+    }
+
+    #[test]
+    fn triangulate_five_points() {
+        let points = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, 0.5]];
+
+        let triangulation = triangulate(&points);
+
+        assert_eq!(triangulation.num_super_triangle_points, 0);
+        assert!(triangulation.num_triangles() > 0);
+        assert_eq!(triangulation.num_points(), 5);
+        assert_all_vertex_indices_in_range(&triangulation, points.len());
+        assert_neighbors_consistent(&triangulation);
+        assert_delaunay(&triangulation);
+    }
+
+    #[test]
+    fn triangulate_no_super_triangle_vertices() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [0.5, 0.5],
+            [1.5, 0.5],
+            [0.5, 1.5],
+            [1.5, 1.5],
+        ];
+
+        let triangulation = triangulate(&points);
+
+        assert_eq!(triangulation.num_super_triangle_points, 0);
+        assert_eq!(triangulation.num_points(), points.len());
+        assert_all_vertex_indices_in_range(&triangulation, points.len());
+    }
+
+    #[test]
+    fn update_adds_points() {
+        let points = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0], [1.5, 1.5]];
+        let mut t = triangulate(&points);
+        let new_points = [[0.8, 0.8], [2.2, 0.8], [1.5, 2.2]];
+        update_triangulation(&mut t, &new_points);
+        assert_eq!(t.num_points(), 8);
+    }
+
+    #[test]
+    fn update_preserves_neighbor_consistency() {
+        let points = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0], [2.0, 2.0]];
+        let mut t = triangulate(&points);
+        let new_points = [[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0], [2.0, 1.5]];
+        update_triangulation(&mut t, &new_points);
+        assert_neighbors_consistent(&t);
+    }
+
+    #[test]
+    fn update_no_super_triangle_vertices() {
+        let points = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0], [1.5, 1.5]];
+        let mut t = triangulate(&points);
+        let new_points = [[0.8, 0.8], [2.2, 0.8], [1.5, 2.2]];
+        update_triangulation(&mut t, &new_points);
+        let n = t.num_points();
+        for &[a, b, c] in &t.triangle_vertices {
+            assert!(a < n, "vertex {} out of range", a);
+            assert!(b < n, "vertex {} out of range", b);
+            assert!(c < n, "vertex {} out of range", c);
+        }
+    }
+
+    #[test]
+    fn polygon_square_edges() {
+        let edges = vec![(0usize, 1usize), (1, 2), (2, 3), (3, 0)];
+        let polygons = build_polygons_from_edges(&edges);
+        assert_eq!(polygons.len(), 1);
+        let poly = &polygons[0];
+        assert_eq!(poly.len(), 4);
+        // All vertices 0..3 present
+        let mut sorted = poly.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn polygon_area_ccw() {
+        // CCW unit square: (0,0)->(1,0)->(1,1)->(0,1)
+        let points: Vec<Point> = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let polygon = vec![0, 1, 2, 3];
+        let area = polygon_area(&points, &polygon);
+        assert!((area - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn polygon_area_cw() {
+        // CW unit square: (0,0)->(0,1)->(1,1)->(1,0)
+        let points: Vec<Point> = vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let polygon = vec![0, 1, 2, 3];
+        let area = polygon_area(&points, &polygon);
+        assert!((area + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn two_separate_polygons() {
+        // Triangle 0-1-2 and triangle 3-4-5
+        let edges = vec![(0usize, 1usize), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)];
+        let polygons = build_polygons_from_edges(&edges);
+        assert_eq!(polygons.len(), 2);
+        assert_eq!(polygons[0].len(), 3);
+        assert_eq!(polygons[1].len(), 3);
+    }
+
+    #[test]
+    fn triangulate_neighbor_consistency() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [0.5, 0.5],
+            [1.5, 0.5],
+            [0.5, 1.5],
+            [1.5, 1.5],
+        ];
+
+        let triangulation = triangulate(&points);
+
+        assert_neighbors_consistent(&triangulation);
+    }
+
+    #[test]
+    fn remove_holes_empty_slice_leaves_triangulation_unchanged() {
+        let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut t = triangulate(&points);
+        let original_count = t.num_triangles();
+        remove_holes(&mut t, &[]);
+        assert_eq!(t.num_triangles(), original_count);
+        assert_neighbors_consistent(&t);
+    }
+
+    #[test]
+    fn remove_holes_seed_outside_triangulation_is_skipped() {
+        let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut t = triangulate(&points);
+        let original_count = t.num_triangles();
+        remove_holes(&mut t, &[[99.0, 99.0]]);
+        assert_eq!(t.num_triangles(), original_count);
+        assert_neighbors_consistent(&t);
+    }
+
+    #[test]
+    fn remove_holes_flood_fill_stops_at_constrained_edges() {
+        use crate::constrained::add_constraints;
+
+        let outer = [[0.0, 0.0], [6.0, 0.0], [6.0, 6.0], [0.0, 6.0]];
+        let inner = [[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]];
+        let all_points: Vec<[f64; 2]> = outer.iter().chain(inner.iter()).copied().collect();
+
+        let mut t = triangulate(&all_points);
+
+        let constraints = vec![(4, 5), (5, 6), (6, 7), (7, 4)];
+        add_constraints(&mut t, &constraints);
+
+        let before_count = t.num_triangles();
+
+        remove_holes(&mut t, &[[3.0, 3.0]]);
+
+        let after_count = t.num_triangles();
+        assert!(
+            after_count < before_count,
+            "expected fewer triangles after hole removal: before={before_count}, after={after_count}"
+        );
+        assert_neighbors_consistent(&t);
+    }
+}
