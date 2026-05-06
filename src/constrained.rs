@@ -76,9 +76,13 @@ pub fn is_quadrilateral_convex(t: &Triangulation, tri_a: usize, tri_b: usize) ->
 }
 
 /// Walk the triangulation from v1 toward v2, collecting all triangle edges that
-/// properly intersect segment (v1,v2). Returns Vec<(tri_idx, neighbor_tri_idx)> pairs.
+/// properly intersect segment (v1,v2). Returns None if the walk fails.
 /// Port from Python constrained.py:find_intersecting_edges
-pub fn find_intersecting_edges(t: &Triangulation, v1: usize, v2: usize) -> Vec<(usize, usize)> {
+pub fn find_intersecting_edges(
+    t: &Triangulation,
+    v1: usize,
+    v2: usize,
+) -> Option<Vec<(usize, usize)>> {
     let p = t.points[v1];
     let q = t.points[v2];
 
@@ -100,11 +104,13 @@ pub fn find_intersecting_edges(t: &Triangulation, v1: usize, v2: usize) -> Vec<(
     // If any triangle contains both v1 and v2, the edge is already in the triangulation
     for &tri in &tris_with_v1 {
         if tris_with_v2.contains(&tri) {
-            return vec![];
+            return Some(vec![]);
         }
     }
 
-    let tp = tris_with_v1[0];
+    let Some(&tp) = tris_with_v1.first() else {
+        return None;
+    };
 
     let mut intersecting: Vec<(usize, usize)> = Vec::new();
     let mut current = tp;
@@ -161,17 +167,15 @@ pub fn find_intersecting_edges(t: &Triangulation, v1: usize, v2: usize) -> Vec<(
             continue;
         }
 
-        panic!(
-            "find_intersecting_edges: failed to advance from triangle {} toward v2={}",
-            current, v2
-        );
+        return None;
     }
 
-    intersecting
+    Some(intersecting)
 }
 
 /// Case C: check for proper crossing in triangle current_tri
-/// Returns Some((next_tri, Option<edge>)) or None if not found
+/// Returns Some((next_tri, Option<edge>)) on success.
+/// Returns None when no valid crossing is found or the walk would leave the triangulation.
 fn check_proper_crossing(
     t: &Triangulation,
     current_tri: usize,
@@ -214,7 +218,7 @@ fn check_proper_crossing(
         if o_q * o_opp < 0.0 {
             let neighbor_idx = t.triangle_neighbors[current_tri][opp_local];
             if neighbor_idx == NO_NEIGHBOR {
-                panic!("find_intersecting_edges: ended up outside triangulation");
+                return None;
             }
             if visited.contains(&neighbor_idx) {
                 continue;
@@ -378,9 +382,9 @@ pub fn remove_intersecting_edges(
     v1: usize,
     v2: usize,
     edges: Vec<(usize, usize)>,
-) -> Vec<(usize, usize)> {
+) -> Option<Vec<(usize, usize)>> {
     if edges.is_empty() {
-        return vec![];
+        return Some(vec![]);
     }
 
     let p = t.points[v1];
@@ -402,15 +406,12 @@ pub fn remove_intersecting_edges(
                 swap_diagonal(t, cand_a, cand_b);
 
                 let Some((new_v1, new_v2)) = find_shared_edge(t, cand_a, cand_b) else {
-                    panic!(
-                        "remove_intersecting_edges: swapped triangles {} and {} no longer share an edge",
-                        cand_a, cand_b
-                    );
+                    return None;
                 };
 
                 let new_edge = Triangulation::edge_key(new_v1, new_v2);
                 if new_edge == constraint_edge {
-                    return newly_created;
+                    return Some(newly_created);
                 }
 
                 if !segments_intersect(&p, &q, &t.points[new_edge.0], &t.points[new_edge.1]) {
@@ -425,16 +426,15 @@ pub fn remove_intersecting_edges(
         }
 
         if candidate.is_some() {
-            panic!("remove_intersecting_edges: failed to find a convex intersecting edge to swap");
+            return None;
         }
     }
 
-    assert!(
-        collect_intersecting_edge_pairs(t, v1, v2).is_empty(),
-        "remove_intersecting_edges: failed to remove all intersecting edges within safety limit"
-    );
+    if !collect_intersecting_edge_pairs(t, v1, v2).is_empty() {
+        return None;
+    }
 
-    newly_created
+    Some(newly_created)
 }
 
 pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (usize, usize) {
@@ -504,10 +504,7 @@ fn restore_delaunay_edges(
             if incircle(&a, &b, &c, &d) > 0.0 {
                 swap_diagonal(t, tri_a, tri_b);
                 let Some((new_v1, new_v2)) = find_shared_edge(t, tri_a, tri_b) else {
-                    panic!(
-                        "restore_delaunay_edges: swapped triangles {} and {} no longer share an edge",
-                        tri_a, tri_b
-                    );
+                    return false;
                 };
                 next_edges.push(Triangulation::edge_key(new_v1, new_v2));
                 swapped = true;
@@ -533,7 +530,10 @@ pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) ->
         let newly_created = if intersecting.is_empty() {
             Vec::new()
         } else {
-            remove_intersecting_edges(t, v1, v2, intersecting)
+            let Some(newly_created) = remove_intersecting_edges(t, v1, v2, intersecting) else {
+                return false;
+            };
+            newly_created
         };
 
         t.constrained_edges.insert(constraint_edge);
@@ -726,7 +726,7 @@ mod tests {
         //   tri0=[0,1,2], tri1=[0,2,3]
         //   Constraint from vertex 1 to vertex 3 — should cross edge 0-2 (shared diagonal)
         let t = two_tri_quad();
-        let edges = find_intersecting_edges(&t, 1, 3);
+        let edges = find_intersecting_edges(&t, 1, 3).expect("walk should succeed");
         assert_eq!(edges.len(), 1, "Should find exactly 1 intersecting edge");
         // The edge returned should be (tri0, tri1) or (tri1, tri0)
         let (a, b) = edges[0];
@@ -742,7 +742,7 @@ mod tests {
     fn find_intersecting_edges_already_in_triangulation() {
         // Constraint from 0 to 2 — already the shared edge of both triangles
         let t = two_tri_quad();
-        let edges = find_intersecting_edges(&t, 0, 2);
+        let edges = find_intersecting_edges(&t, 0, 2).expect("walk should succeed");
         assert_eq!(
             edges.len(),
             0,

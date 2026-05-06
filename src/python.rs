@@ -126,6 +126,12 @@ fn remove_holes(t: &mut PyTriangulation, holes: PyReadonlyArray2<f64>) -> PyResu
 }
 
 #[pyfunction]
+fn remove_holes_by_edges(t: &mut PyTriangulation, edges: Vec<(usize, usize)>) -> PyResult<()> {
+    crate::build::remove_holes_by_edges(&mut t.inner, &edges);
+    Ok(())
+}
+
+#[pyfunction]
 fn remove_super_triangle(t: &mut PyTriangulation) -> PyResult<()> {
     crate::build::remove_super_triangle(&mut t.inner);
     Ok(())
@@ -153,6 +159,7 @@ fn pycdt_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(triangulate, m)?)?;
     m.add_function(wrap_pyfunction!(add_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(remove_holes, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_holes_by_edges, m)?)?;
     m.add_function(wrap_pyfunction!(remove_super_triangle, m)?)?;
     m.add_function(wrap_pyfunction!(update_triangulation, m)?)?;
     m.add_function(wrap_pyfunction!(build_polygons_from_edges, m)?)?;

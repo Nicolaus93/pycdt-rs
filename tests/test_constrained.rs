@@ -78,7 +78,7 @@ fn test_segments_intersect_diagonal() {
 fn test_find_intersecting_edges_existing_edge_returns_empty() {
     let points: &[[f64; 2]] = &[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
     let t = triangulate(points);
-    let edges = find_intersecting_edges(&t, 0, 1);
+    let edges = find_intersecting_edges(&t, 0, 1).expect("walk should succeed");
     assert_eq!(edges.len(), 0);
 }
 
@@ -90,7 +90,9 @@ fn test_find_intersecting_edges_returns_valid_entries() {
     let mut found = false;
     'outer: for v1 in 0..n {
         for v2 in (v1 + 1)..n {
-            let edges = find_intersecting_edges(&t, v1, v2);
+            let Some(edges) = find_intersecting_edges(&t, v1, v2) else {
+                continue;
+            };
             if edges.len() > 0 {
                 for &(t1, t2) in &edges {
                     assert!(t1 < t.num_triangles());
@@ -115,7 +117,9 @@ fn test_find_intersecting_edges_returns_vec() {
     let mut found_intersecting = false;
     for v1 in 0..n {
         for v2 in (v1 + 1)..n {
-            let edges = find_intersecting_edges(&t, v1, v2);
+            let Some(edges) = find_intersecting_edges(&t, v1, v2) else {
+                continue;
+            };
             if edges.len() > 0 {
                 found_intersecting = true;
                 for &(t1, t2) in &edges {

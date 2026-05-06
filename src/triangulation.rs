@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::types::{Point, TriangleNeighbors, TriangleVertices, NO_NEIGHBOR};
 
+#[derive(Clone)]
 pub struct Triangulation {
     pub points: Vec<Point>,
     pub triangle_vertices: Vec<TriangleVertices>,
