@@ -4,8 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "pycdt_rs"
+version = "0.1.0"
 requires-python = ">=3.8"
 classifiers = ["Programming Language :: Rust"]
+dependencies = [
+    "matplotlib>=3.7.5",
+    "pyside6>=6.6.3.1",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
