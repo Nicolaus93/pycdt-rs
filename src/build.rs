@@ -96,43 +96,13 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
 
-    let mut indexed_points: Vec<(usize, Point)> =
-        input_points.iter().copied().enumerate().collect();
-    indexed_points.sort_by(|a, b| {
-        a.1[0]
-            .partial_cmp(&b.1[0])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                a.1[1]
-                    .partial_cmp(&b.1[1])
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-    });
-
-    let mut sorted_to_original = vec![0usize; input_points.len()];
-    for (sorted_idx, (original_idx, point)) in indexed_points.into_iter().enumerate() {
-        sorted_to_original[sorted_idx] = original_idx;
+    for &point in input_points {
         t.points.push(point);
         let point_idx = t.points.len() - 1;
         insert_point(&mut t, point_idx);
     }
 
     remove_super_triangle(&mut t);
-
-    // Remap from sorted order back to original input order
-    let n = input_points.len();
-    let mut new_points = vec![[0.0; 2]; n];
-    for (sorted_idx, &original_idx) in sorted_to_original.iter().enumerate() {
-        new_points[original_idx] = t.points[sorted_idx];
-    }
-    t.points = new_points;
-
-    for vertices in &mut t.triangle_vertices {
-        for v in vertices.iter_mut() {
-            *v = sorted_to_original[*v];
-        }
-    }
-
     t
 }
 
