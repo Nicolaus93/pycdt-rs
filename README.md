@@ -1,5 +1,8 @@
 # Constrained Delaunay Triangulation
 
+<!-- Replace OWNER/REPO with your GitHub repository path -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/tests.yml)
+
 A Rust implementation of 2D Delaunay and constrained Delaunay triangulation, with Python bindings for experimentation, visualization, and educational use.
 
 ## Overview
