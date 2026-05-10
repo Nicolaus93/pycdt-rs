@@ -108,9 +108,7 @@ pub fn find_intersecting_edges(
         }
     }
 
-    let Some(&tp) = tris_with_v1.first() else {
-        return None;
-    };
+    let &tp = tris_with_v1.first()?;
 
     let mut intersecting: Vec<(usize, usize)> = Vec::new();
     let mut current = tp;
@@ -405,9 +403,7 @@ pub fn remove_intersecting_edges(
             if is_quadrilateral_convex(t, cand_a, cand_b) {
                 swap_diagonal(t, cand_a, cand_b);
 
-                let Some((new_v1, new_v2)) = find_shared_edge(t, cand_a, cand_b) else {
-                    return None;
-                };
+                let (new_v1, new_v2) = find_shared_edge(t, cand_a, cand_b)?;
 
                 let new_edge = Triangulation::edge_key(new_v1, new_v2);
                 if new_edge == constraint_edge {
