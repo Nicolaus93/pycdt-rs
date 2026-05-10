@@ -93,7 +93,7 @@ fn test_find_intersecting_edges_returns_valid_entries() {
             let Some(edges) = find_intersecting_edges(&t, v1, v2) else {
                 continue;
             };
-            if edges.len() > 0 {
+            if !edges.is_empty() {
                 for &(t1, t2) in &edges {
                     assert!(t1 < t.num_triangles());
                     assert!(t2 < t.num_triangles());
@@ -120,7 +120,7 @@ fn test_find_intersecting_edges_returns_vec() {
             let Some(edges) = find_intersecting_edges(&t, v1, v2) else {
                 continue;
             };
-            if edges.len() > 0 {
+            if !edges.is_empty() {
                 found_intersecting = true;
                 for &(t1, t2) in &edges {
                     assert!(t1 < t.num_triangles());
@@ -262,8 +262,8 @@ fn test_add_constraints_two_adjacent_triangles_consistent() {
     let points: &[[f64; 2]] = &[[0.0, 0.0], [1.0, 0.0], [0.5, 1.0], [1.5, 1.0]];
     let mut t = triangulate(points);
     if let Some((i, j)) = find_two_adjacent_triangles(&t) {
-        let vi: Vec<usize> = t.triangle_vertices[i].iter().copied().collect();
-        let vj: Vec<usize> = t.triangle_vertices[j].iter().copied().collect();
+        let vi: Vec<usize> = t.triangle_vertices[i].to_vec();
+        let vj: Vec<usize> = t.triangle_vertices[j].to_vec();
         let shared: Vec<usize> = vi.iter().copied().filter(|v| vj.contains(v)).collect();
         if shared.len() == 2 {
             add_constraints(&mut t, &[(shared[0], shared[1])]);
