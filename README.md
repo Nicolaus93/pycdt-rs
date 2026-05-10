@@ -1,7 +1,6 @@
 # Constrained Delaunay Triangulation
 
-<!-- Replace OWNER/REPO with your GitHub repository path -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/tests.yml)
+[![CI](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/tests.yml/badge.svg)](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/tests.yml)
 
 A Rust implementation of 2D Delaunay and constrained Delaunay triangulation, with Python bindings for experimentation, visualization, and educational use.
 
@@ -157,13 +156,6 @@ These predicates are central to triangle location, edge legality checks, and top
 The `examples/` directory includes:
 
 - `examples/basic_triangulation.py`
-- `examples/constrained_triangulation.py`
-- `examples/points_on_edge.py`
-- `examples/circle.py`
-- `examples/plane_face.py`
-- `examples/plane_face_2.py`
-- `examples/cyl_face.py`
-- `examples/toroidal_face.py`
 
 Run an example after installing the module locally:
 
