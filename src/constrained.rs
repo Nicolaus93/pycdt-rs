@@ -403,10 +403,6 @@ pub fn remove_intersecting_edges(
                 swap_diagonal(t, cand_a, cand_b);
 
                 let (new_v1, new_v2) = find_shared_edge(t, cand_a, cand_b)?;
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/master
                 let new_edge = Triangulation::edge_key(new_v1, new_v2);
                 if new_edge == constraint_edge {
                     return Some(newly_created);
