@@ -2,7 +2,7 @@ use crate::geometry::{ensure_ccw, is_point_inside_polygon, point_in_triangle, Po
 use crate::topology::{lawson_swapping, reorder_neighbors};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
     assert!(
@@ -589,57 +589,6 @@ pub fn remove_holes_by_edges(t: &mut Triangulation, constrained_edges: &[(usize,
     )
 }
 
-pub fn remove_holes(t: &mut Triangulation, holes: &[Point]) {
-    if holes.is_empty() {
-        return;
-    }
-
-    let mut to_delete: HashSet<usize> = HashSet::new();
-
-    for seed in holes {
-        let start_tri = match find_containing_triangle(t, seed) {
-            PointLocation::Interior(idx) | PointLocation::OnEdge(idx, _) => idx,
-            PointLocation::NotFound => continue,
-        };
-
-        let mut queue: VecDeque<usize> = VecDeque::new();
-        queue.push_back(start_tri);
-        to_delete.insert(start_tri);
-
-        while let Some(tri_idx) = queue.pop_front() {
-            let verts = t.triangle_vertices[tri_idx];
-            let neighbors = t.triangle_neighbors[tri_idx];
-
-            for i in 0..3 {
-                let neighbor = neighbors[i];
-                if neighbor == NO_NEIGHBOR || to_delete.contains(&neighbor) {
-                    continue;
-                }
-                // The shared edge between tri_idx and neighbor[i] is opposite vertex i:
-                // formed by vertices (i+1)%3 and (i+2)%3. Stop flood fill at constrained edges.
-                let va = verts[(i + 1) % 3];
-                let vb = verts[(i + 2) % 3];
-                if t.constrained_edges
-                    .contains(&Triangulation::edge_key(va, vb))
-                {
-                    continue;
-                }
-                to_delete.insert(neighbor);
-                queue.push_back(neighbor);
-            }
-        }
-    }
-
-    if to_delete.is_empty() {
-        return;
-    }
-
-    let keep: Vec<usize> = (0..t.triangle_vertices.len())
-        .filter(|idx| !to_delete.contains(idx))
-        .collect();
-    retain_triangles(t, &keep);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,51 +902,6 @@ mod tests {
         let triangulation = triangulate(&points);
 
         assert_neighbors_consistent(&triangulation);
-    }
-
-    #[test]
-    fn remove_holes_empty_slice_leaves_triangulation_unchanged() {
-        let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let mut t = triangulate(&points);
-        let original_count = t.num_triangles();
-        remove_holes(&mut t, &[]);
-        assert_eq!(t.num_triangles(), original_count);
-        assert_neighbors_consistent(&t);
-    }
-
-    #[test]
-    fn remove_holes_seed_outside_triangulation_is_skipped() {
-        let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let mut t = triangulate(&points);
-        let original_count = t.num_triangles();
-        remove_holes(&mut t, &[[99.0, 99.0]]);
-        assert_eq!(t.num_triangles(), original_count);
-        assert_neighbors_consistent(&t);
-    }
-
-    #[test]
-    fn remove_holes_flood_fill_stops_at_constrained_edges() {
-        use crate::constrained::add_constraints;
-
-        let outer = [[0.0, 0.0], [6.0, 0.0], [6.0, 6.0], [0.0, 6.0]];
-        let inner = [[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]];
-        let all_points: Vec<[f64; 2]> = outer.iter().chain(inner.iter()).copied().collect();
-
-        let mut t = triangulate(&all_points);
-
-        let constraints = vec![(4, 5), (5, 6), (6, 7), (7, 4)];
-        add_constraints(&mut t, &constraints);
-
-        let before_count = t.num_triangles();
-
-        remove_holes(&mut t, &[[3.0, 3.0]]);
-
-        let after_count = t.num_triangles();
-        assert!(
-            after_count < before_count,
-            "expected fewer triangles after hole removal: before={before_count}, after={after_count}"
-        );
-        assert_neighbors_consistent(&t);
     }
 
     #[test]
