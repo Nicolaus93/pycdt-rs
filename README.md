@@ -109,7 +109,6 @@ Functions exposed by `pycdt_rs`:
 - `triangulate(points)`
 - `update_triangulation(triangulation, new_points)`
 - `add_constraints(triangulation, edges)`
-- `remove_holes(triangulation, holes)`
 - `remove_holes_by_edges(triangulation, edges)`
 - `remove_super_triangle(triangulation)`
 - `build_polygons_from_edges(triangulation, edges)`
