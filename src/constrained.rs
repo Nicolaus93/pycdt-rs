@@ -77,7 +77,6 @@ pub fn is_quadrilateral_convex(t: &Triangulation, tri_a: usize, tri_b: usize) ->
 
 /// Walk the triangulation from v1 toward v2, collecting all triangle edges that
 /// properly intersect segment (v1,v2). Returns None if the walk fails.
-/// Port from Python constrained.py:find_intersecting_edges
 pub fn find_intersecting_edges(
     t: &Triangulation,
     v1: usize,
@@ -404,7 +403,6 @@ pub fn remove_intersecting_edges(
                 swap_diagonal(t, cand_a, cand_b);
 
                 let (new_v1, new_v2) = find_shared_edge(t, cand_a, cand_b)?;
-
                 let new_edge = Triangulation::edge_key(new_v1, new_v2);
                 if new_edge == constraint_edge {
                     return Some(newly_created);
