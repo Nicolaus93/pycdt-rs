@@ -1,6 +1,6 @@
 # pycdt-rs
 
-[![CI](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/tests.yml/badge.svg)](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/tests.yml)
+[![CI](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/ci.yml)
 
 A Rust implementation of 2D Delaunay and constrained Delaunay triangulation.
 
@@ -90,7 +90,7 @@ import pycdt_rs
 - Delaunay triangulation via incremental point insertion
 - constrained edge insertion
 - incremental updates
-- hole removal by seed points or polygon edges
+- hole removal by polygon edges
 - robust predicates via the `robust` crate
 - Rust API for native use
 - Python bindings as a separate project
@@ -102,7 +102,6 @@ The Python extension exposes:
 - `triangulate(points)`
 - `update_triangulation(triangulation, new_points)`
 - `add_constraints(triangulation, edges)`
-- `remove_holes(triangulation, holes)`
 - `remove_holes_by_edges(triangulation, edges)`
 - `remove_super_triangle(triangulation)`
 - `build_polygons_from_edges(triangulation, edges)`
