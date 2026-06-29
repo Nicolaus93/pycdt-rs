@@ -27,6 +27,15 @@ cargo build --release
 cargo test
 ```
 
+Lint/format helpers are available through `just`:
+
+```bash
+just fmt
+just fmt-check
+just clippy
+just check
+```
+
 Use it from another Rust project as a normal dependency:
 
 ```toml
@@ -112,6 +121,21 @@ The Python extension exposes:
 - constraint indices refer to rows in the input point array
 - Python neighbor arrays use `-1` for missing neighbors
 - `update_triangulation()` should be used before removing the super triangle
+
+## Pre-commit
+
+This repo includes a `pre-commit` config that runs Rust formatting and clippy checks:
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+The hooks run:
+
+- `just fmt-check`
+- `just clippy`
 
 ## License
 

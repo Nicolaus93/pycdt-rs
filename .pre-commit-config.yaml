@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: rust-fmt
+        name: rust fmt
+        entry: just fmt-check
+        language: system
+        pass_filenames: false
+      - id: rust-clippy
+        name: rust clippy
+        entry: just clippy
+        language: system
+        pass_filenames: false
