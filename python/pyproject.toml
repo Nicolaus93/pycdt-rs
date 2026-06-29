@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pycdt_rs"
+version = "0.1.0"
+requires-python = ">=3.8"
+classifiers = ["Programming Language :: Rust"]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+examples = [
+    "matplotlib>=3.7.5",
+    "pyside6>=6.6.3.1",
+]

@@ -1,0 +1,14 @@
+[package]
+name = "pycdt-rs-python"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "pycdt_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pycdt_core = { package = "pycdt-rs", path = ".." }
+pyo3 = { version = "0.24", features = ["extension-module"] }
+numpy = "0.24"
