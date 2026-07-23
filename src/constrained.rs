@@ -107,7 +107,26 @@ pub fn find_intersecting_edges(
         }
     }
 
-    let &tp = tris_with_v1.first()?;
+    use crate::geometry::point_in_triangle;
+    use crate::geometry::PointInTriangle;
+
+    // Start in the incident triangle entered by the segment. The first
+    // triangle found in storage is not necessarily on the v1-to-v2 ray.
+    let direction = [q[0] - p[0], q[1] - p[1]];
+    let near_v1 = [p[0] + direction[0] * 1.0e-8, p[1] + direction[1] * 1.0e-8];
+    let tp = tris_with_v1
+        .iter()
+        .copied()
+        .find(|&tri| {
+            let verts = t.triangle_vertices[tri];
+            point_in_triangle(
+                &near_v1,
+                &t.points[verts[0]],
+                &t.points[verts[1]],
+                &t.points[verts[2]],
+            ) != PointInTriangle::Outside
+        })
+        .or_else(|| tris_with_v1.first().copied())?;
 
     let mut intersecting: Vec<(usize, usize)> = Vec::new();
     let mut current = tp;
@@ -350,30 +369,6 @@ fn point_in_segment_bbox(a: &Point, b: &Point, p: &Point) -> bool {
     p[0] >= min_x - EPS && p[0] <= max_x + EPS && p[1] >= min_y - EPS && p[1] <= max_y + EPS
 }
 
-fn collect_intersecting_edge_pairs(t: &Triangulation, v1: usize, v2: usize) -> Vec<(usize, usize)> {
-    let p = t.points[v1];
-    let q = t.points[v2];
-    let mut result = Vec::new();
-
-    for tri_a in 0..t.triangle_vertices.len() {
-        for &tri_b in &t.triangle_neighbors[tri_a] {
-            if tri_b == NO_NEIGHBOR || tri_a >= tri_b {
-                continue;
-            }
-
-            let Some((edge_v1, edge_v2)) = find_shared_edge(t, tri_a, tri_b) else {
-                continue;
-            };
-
-            if segments_intersect(&p, &q, &t.points[edge_v1], &t.points[edge_v2]) {
-                result.push((tri_a, tri_b));
-            }
-        }
-    }
-
-    result
-}
-
 pub fn remove_intersecting_edges(
     t: &mut Triangulation,
     v1: usize,
@@ -390,9 +385,9 @@ pub fn remove_intersecting_edges(
     let mut newly_created = Vec::new();
     let max_iterations = edges.len().max(1) * 10;
 
+    let mut intersecting: VecDeque<(usize, usize)> = edges.into();
+
     for _ in 0..max_iterations {
-        let mut intersecting: VecDeque<(usize, usize)> =
-            collect_intersecting_edge_pairs(t, v1, v2).into();
         let Some((tri_a, tri_b)) = intersecting.pop_front() else {
             break;
         };
@@ -422,9 +417,18 @@ pub fn remove_intersecting_edges(
         if candidate.is_some() {
             return None;
         }
+
+        // A diagonal flip changes the local topology. Walk the updated
+        // triangulation from v1 toward v2 instead of rescanning every edge.
+        intersecting = match find_intersecting_edges(t, v1, v2) {
+            Some(edges) => edges.into(),
+            None => {
+                return None;
+            }
+        };
     }
 
-    if !collect_intersecting_edge_pairs(t, v1, v2).is_empty() {
+    if !find_intersecting_edges(t, v1, v2)?.is_empty() {
         return None;
     }
 
@@ -519,7 +523,9 @@ fn restore_delaunay_edges(
 pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) -> bool {
     for &(v1, v2) in constraints {
         let constraint_edge = Triangulation::edge_key(v1, v2);
-        let intersecting = collect_intersecting_edge_pairs(t, v1, v2);
+        let Some(intersecting) = find_intersecting_edges(t, v1, v2) else {
+            return false;
+        };
 
         let newly_created = if intersecting.is_empty() {
             Vec::new()
