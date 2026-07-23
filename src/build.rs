@@ -1,4 +1,6 @@
-use crate::geometry::{ensure_ccw, is_point_inside_polygon, point_in_triangle, PointInTriangle};
+use crate::geometry::{
+    ensure_ccw, is_point_inside_polygon, orient2d, point_in_triangle, PointInTriangle,
+};
 use crate::topology::{lawson_swapping, reorder_neighbors};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
@@ -107,17 +109,69 @@ pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
 }
 
 pub fn find_containing_triangle(t: &Triangulation, point: &Point) -> PointLocation {
-    for (tri_idx, vertices) in t.triangle_vertices.iter().enumerate() {
-        let [v0, v1, v2] = *vertices;
-        let position = point_in_triangle(point, &t.points[v0], &t.points[v1], &t.points[v2]);
+    if t.triangle_vertices.is_empty() {
+        return PointLocation::NotFound;
+    }
+
+    // Walk through neighboring triangles instead of testing every triangle.
+    // The triangulation is connected, so starting at triangle zero reaches
+    // any containing triangle, or a boundary edge for an outside point.
+    let mut current = 0usize;
+    let max_iterations = t.triangle_vertices.len() + 1;
+
+    for _ in 0..max_iterations {
+        let vertices = t.triangle_vertices[current];
+        let position = point_in_triangle(
+            point,
+            &t.points[vertices[0]],
+            &t.points[vertices[1]],
+            &t.points[vertices[2]],
+        );
 
         match position {
-            PointInTriangle::Inside => return PointLocation::Interior(tri_idx),
-            PointInTriangle::OnEdge0 => return PointLocation::OnEdge(tri_idx, 0),
-            PointInTriangle::OnEdge1 => return PointLocation::OnEdge(tri_idx, 1),
-            PointInTriangle::OnEdge2 => return PointLocation::OnEdge(tri_idx, 2),
-            PointInTriangle::Outside => continue,
+            PointInTriangle::Inside => return PointLocation::Interior(current),
+            PointInTriangle::OnEdge0 => return PointLocation::OnEdge(current, 0),
+            PointInTriangle::OnEdge1 => return PointLocation::OnEdge(current, 1),
+            PointInTriangle::OnEdge2 => return PointLocation::OnEdge(current, 2),
+            PointInTriangle::Outside => {}
         }
+
+        let triangle_orientation = orient2d(
+            &t.points[vertices[0]],
+            &t.points[vertices[1]],
+            &t.points[vertices[2]],
+        );
+
+        let mut next = None;
+        for opposite_vertex in 0..3 {
+            let edge_start = vertices[(opposite_vertex + 1) % 3];
+            let edge_end = vertices[(opposite_vertex + 2) % 3];
+            let edge_orientation = orient2d(&t.points[edge_start], &t.points[edge_end], point);
+
+            // For a consistently oriented triangle, a negative product means
+            // the point lies beyond the edge opposite this vertex.
+            if edge_orientation * triangle_orientation < 0.0 {
+                let neighbor = t.triangle_neighbors[current]
+                    .iter()
+                    .copied()
+                    .filter(|&neighbor| neighbor != NO_NEIGHBOR)
+                    .find(|&neighbor| {
+                        let neighbor_vertices = t.triangle_vertices[neighbor];
+                        neighbor_vertices.contains(&edge_start)
+                            && neighbor_vertices.contains(&edge_end)
+                    });
+                let Some(neighbor) = neighbor else {
+                    return PointLocation::NotFound;
+                };
+                next = Some(neighbor);
+                break;
+            }
+        }
+
+        let Some(next) = next else {
+            return PointLocation::NotFound;
+        };
+        current = next;
     }
 
     PointLocation::NotFound
