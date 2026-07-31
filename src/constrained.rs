@@ -262,10 +262,10 @@ fn check_collinear_overlap(
         &t.points[tri_verts[2]],
     ];
 
-    // edges: (local_start, local_end, opposite_local)
-    let edges = [(0usize, 1usize, 2usize), (1, 2, 0), (2, 0, 1)];
+    // edges: (local_start, local_end)
+    let edges = [(0usize, 1usize), (1, 2), (2, 0)];
 
-    for (ls, le, opp_local) in edges {
+    for (ls, le) in edges {
         let pqs = orient2d(p, q, pts[ls]);
         let pqe = orient2d(p, q, pts[le]);
 
@@ -277,23 +277,68 @@ fn check_collinear_overlap(
         if !collinear_overlap(p, q, pts[ls], pts[le]) {
             continue;
         }
+        let start_distance = (pts[ls][0] - p[0]).powi(2) + (pts[ls][1] - p[1]).powi(2);
+        let end_distance = (pts[le][0] - p[0]).powi(2) + (pts[le][1] - p[1]).powi(2);
+        let forward_vertex = if start_distance > end_distance {
+            tri_verts[ls]
+        } else {
+            tri_verts[le]
+        };
+        if let Some(next) = find_triangle_after_vertex(t, current_tri, forward_vertex, q, visited) {
+            return Some(next);
+        }
+    }
 
-        // Find an unvisited neighbor sharing this edge
-        let neighbor = t.triangle_neighbors[current_tri][opp_local];
-        if neighbor != NO_NEIGHBOR && !visited.contains(&neighbor) {
-            return Some(neighbor);
+    None
+}
+
+fn find_triangle_after_vertex(
+    t: &Triangulation,
+    current_tri: usize,
+    vertex: usize,
+    q: &Point,
+    visited: &std::collections::HashSet<usize>,
+) -> Option<usize> {
+    use crate::geometry::{point_in_triangle, PointInTriangle};
+
+    let vertex_point = t.points[vertex];
+    let probe = [
+        vertex_point[0] + (q[0] - vertex_point[0]) * 1.0e-8,
+        vertex_point[1] + (q[1] - vertex_point[1]) * 1.0e-8,
+    ];
+    let mut queue: VecDeque<usize> = t.triangle_neighbors[current_tri]
+        .iter()
+        .copied()
+        .filter(|&neighbor| neighbor != NO_NEIGHBOR)
+        .collect();
+    let mut fan_visited = std::collections::HashSet::from([current_tri]);
+
+    while let Some(triangle) = queue.pop_front() {
+        if visited.contains(&triangle) || !fan_visited.insert(triangle) {
+            continue;
         }
-        // Also check other neighbors that share a vertex
-        for i in 0..3 {
-            let nb = t.triangle_neighbors[current_tri][i];
-            if nb == NO_NEIGHBOR || visited.contains(&nb) {
-                continue;
-            }
-            let nb_verts = t.triangle_vertices[nb];
-            if nb_verts.contains(&tri_verts[ls]) || nb_verts.contains(&tri_verts[le]) {
-                return Some(nb);
-            }
+
+        let vertices = t.triangle_vertices[triangle];
+        if !vertices.contains(&vertex) {
+            continue;
         }
+
+        if point_in_triangle(
+            &probe,
+            &t.points[vertices[0]],
+            &t.points[vertices[1]],
+            &t.points[vertices[2]],
+        ) != PointInTriangle::Outside
+        {
+            return Some(triangle);
+        }
+
+        queue.extend(
+            t.triangle_neighbors[triangle]
+                .iter()
+                .copied()
+                .filter(|&neighbor| neighbor != NO_NEIGHBOR),
+        );
     }
 
     None
@@ -336,15 +381,10 @@ fn check_one_endpoint_collinear(
             continue;
         }
 
-        // Walk into an unvisited neighbor containing this vertex
-        for i in 0..3 {
-            let nb = t.triangle_neighbors[current_tri][i];
-            if nb == NO_NEIGHBOR || visited.contains(&nb) {
-                continue;
-            }
-            if t.triangle_vertices[nb].contains(&collinear_v) {
-                return Some(nb);
-            }
+        // At a vertex, several triangles may meet the segment. Walk only
+        // through the local fan and select the triangle entered toward q.
+        if let Some(next) = find_triangle_after_vertex(t, current_tri, collinear_v, q, visited) {
+            return Some(next);
         }
     }
 

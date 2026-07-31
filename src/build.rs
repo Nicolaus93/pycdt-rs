@@ -95,13 +95,54 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
     t.num_super_triangle_points = 0;
 }
 
+fn sort_insertion_order_snake(points: &[Point], insertion_order: &mut [usize]) {
+    insertion_order.sort_by(|&lhs, &rhs| {
+        let lhs_point = points[lhs];
+        let rhs_point = points[rhs];
+        lhs_point[0]
+            .total_cmp(&rhs_point[0])
+            .then_with(|| lhs_point[1].total_cmp(&rhs_point[1]))
+            .then_with(|| lhs.cmp(&rhs))
+    });
+
+    let mut column_start = 0;
+    let mut descending = false;
+    while column_start < insertion_order.len() {
+        let column_x = points[insertion_order[column_start]][0];
+        let mut column_end = column_start + 1;
+        while column_end < insertion_order.len()
+            && points[insertion_order[column_end]][0]
+                .total_cmp(&column_x)
+                .is_eq()
+        {
+            column_end += 1;
+        }
+
+        if descending {
+            insertion_order[column_start..column_end].sort_by(|&lhs, &rhs| {
+                points[rhs][1]
+                    .total_cmp(&points[lhs][1])
+                    .then_with(|| lhs.cmp(&rhs))
+            });
+        }
+
+        descending = !descending;
+        column_start = column_end;
+    }
+}
+
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
-    let mut start_triangle = 0;
+    let first_input_point = t.points.len();
+    t.points.extend_from_slice(input_points);
 
-    for &point in input_points {
-        t.points.push(point);
-        let point_idx = t.points.len() - 1;
+    // Sort only the insertion schedule. Keeping `t.points` in input order
+    // preserves the public vertex-index contract used by constraints.
+    let mut insertion_order: Vec<usize> = (first_input_point..t.points.len()).collect();
+    sort_insertion_order_snake(&t.points, &mut insertion_order);
+
+    let mut start_triangle = 0;
+    for point_idx in insertion_order {
         start_triangle = insert_point_from(&mut t, point_idx, start_triangle);
     }
 
@@ -900,6 +941,52 @@ mod tests {
         assert_all_vertex_indices_in_range(&triangulation, points.len());
         assert_neighbors_consistent(&triangulation);
         assert_delaunay(&triangulation);
+    }
+
+    #[test]
+    fn insertion_order_snakes_through_grid_columns() {
+        let points = [
+            [1.0, 1.0],
+            [0.0, 2.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+            [2.0, 2.0],
+            [1.0, 2.0],
+            [0.0, 1.0],
+            [2.0, 1.0],
+            [1.0, 0.0],
+        ];
+        let mut insertion_order: Vec<usize> = (0..points.len()).collect();
+
+        sort_insertion_order_snake(&points, &mut insertion_order);
+
+        let ordered_points: Vec<Point> = insertion_order
+            .into_iter()
+            .map(|point_idx| points[point_idx])
+            .collect();
+        assert_eq!(
+            ordered_points,
+            vec![
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 2.0],
+                [1.0, 2.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 1.0],
+                [2.0, 2.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn triangulate_preserves_input_point_order() {
+        let points = [[2.0, 1.0], [0.0, 2.0], [1.0, 0.5], [0.0, 0.0], [2.0, 2.0]];
+
+        let triangulation = triangulate(&points);
+
+        assert_eq!(triangulation.points, points);
     }
 
     #[test]
