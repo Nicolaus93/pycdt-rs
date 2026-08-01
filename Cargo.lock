@@ -644,6 +644,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-criterion-compat",
  "proptest",
+ "rand",
  "robust",
 ]
 

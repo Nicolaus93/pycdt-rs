@@ -1,5 +1,28 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use pycdt_rs::{build::triangulate, constrained::add_constraints, Triangulation};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+
+const RANDOM_SEED: u64 = 0x05ee_dc0d_ed15_ca11;
+// The 100,000-point case is temporarily disabled because its setup makes the
+// simulated CI benchmark prohibitively slow.
+const RANDOM_POINT_COUNTS: [usize; 2] = [1_000, 10_000];
+
+fn random_points(count: usize, seed: u64) -> Vec<[f64; 2]> {
+    assert!(count >= 2);
+    let mut generator = StdRng::seed_from_u64(seed);
+    let mut points = Vec::with_capacity(count);
+    // All random points lie strictly above and between the fixed endpoints, so
+    // (0,1) is a guaranteed physical hull edge for every fixture size.
+    points.push([0.0, 0.0]);
+    points.push([1.0, 0.0]);
+    points.extend((2..count).map(|_| {
+        [
+            generator.gen_range(0.001..0.999),
+            generator.gen_range(0.001..0.999),
+        ]
+    }));
+    points
+}
 
 fn grid(width: usize, height: usize, perturb: bool) -> Vec<[f64; 2]> {
     (0..height)
@@ -81,5 +104,48 @@ fn constraint_insertion(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, constraint_insertion);
+fn random_constraint_insertion(c: &mut Criterion) {
+    let mut group = c.benchmark_group("constraint_insertion_random_points");
+
+    for point_count in RANDOM_POINT_COUNTS {
+        let points = random_points(point_count, RANDOM_SEED);
+        let base = std::sync::OnceLock::new();
+        let constraints = [(0, 1)];
+
+        group.bench_function(point_count.to_string(), |bencher| {
+            bencher.iter_batched(
+                || base.get_or_init(|| triangulate(&points)).clone(),
+                |mut triangulation| {
+                    assert!(add_constraints(&mut triangulation, black_box(&constraints)));
+                    black_box(triangulation);
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+
+    group.finish();
+}
+
+fn triangulation_construction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("triangulation_random_points");
+
+    for point_count in RANDOM_POINT_COUNTS {
+        // Point generation is deterministic fixture setup. Only construction
+        // of the complete triangulation is inside the measured region.
+        let points = random_points(point_count, RANDOM_SEED);
+        group.bench_function(point_count.to_string(), |bencher| {
+            bencher.iter(|| black_box(triangulate(black_box(&points))))
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    constraint_insertion,
+    random_constraint_insertion,
+    triangulation_construction
+);
 criterion_main!(benches);
