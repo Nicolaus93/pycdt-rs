@@ -62,36 +62,31 @@ fn insertion_benchmark(
 fn constraint_insertion(c: &mut Criterion) {
     let mut group = c.benchmark_group("constraint_insertion");
 
-    // The perturbed rows avoid collinear intermediate vertices, producing a
-    // long corridor whose crossed edges must be flipped and restored.
-    let width = 24;
-    let height = 24;
-    let perturbed = triangulate(&grid(width, height, true));
-    let long_constraint = [(width * 5, width * 18 + width - 1)];
+    // This asymmetric 3x3 fixture is shared with the focused constraint tests.
+    // Its diagonals reliably exercise corridor flips and Delaunay restoration.
+    let corridor = triangulate(&[
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.1],
+        [2.0, 1.0],
+        [0.0, 2.0],
+        [1.0, 2.0],
+        [2.0, 2.0],
+    ]);
+    insertion_benchmark(&mut group, "single_corridor_3x3", &corridor, &[(0, 8)]);
     insertion_benchmark(
         &mut group,
-        "long_corridor_24x24",
-        &perturbed,
-        &long_constraint,
-    );
-
-    // Several disjoint corridors share one add_constraints call, covering the
-    // batch-lifetime incidence map, queues, and generation-marker storage.
-    let batched_constraints = [
-        (width * 3, width * 7 + width - 1),
-        (width * 9, width * 12 + width - 1),
-        (width * 14, width * 17 + width - 1),
-        (width * 19, width * 21 + width - 1),
-    ];
-    insertion_benchmark(
-        &mut group,
-        "four_disjoint_corridors_24x24",
-        &perturbed,
-        &batched_constraints,
+        "two_connected_corridors_3x3",
+        &corridor,
+        &[(0, 5), (5, 6)],
     );
 
     // A regular-grid diagonal is split into its physical constrained subedges
     // at every existing vertex on the segment.
+    let width = 24;
+    let height = 24;
     let regular = triangulate(&grid(width, height, false));
     let through_vertices = [(0, width * height - 1)];
     insertion_benchmark(
