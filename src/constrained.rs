@@ -411,6 +411,9 @@ fn remove_intersecting_edges_local(
     let mut queue = VecDeque::with_capacity(edges.len());
     let mut queued = HashSet::with_capacity(edges.len());
     let mut handles = HashMap::with_capacity(edges.len() * 2);
+    let mut sides = HashMap::with_capacity(edges.len() * 2 + 2);
+    sides.insert(v1, 0);
+    sides.insert(v2, 0);
 
     // The segment walk orders the crossed edges, but the flip algorithm only
     // needs queue ownership. Seed each physical edge exactly once.
@@ -418,6 +421,12 @@ fn remove_intersecting_edges_local(
         let handle = local_edge_between(t, tri_a, tri_b)?;
         let key = edge_key(t, handle);
         handles.insert(key, handle);
+        sides
+            .entry(key.0)
+            .or_insert_with(|| orientation_side(&p, &q, &t.points[key.0]));
+        sides
+            .entry(key.1)
+            .or_insert_with(|| orientation_side(&p, &q, &t.points[key.1]));
         enqueue_edge(key, &mut queue, &mut queued);
     }
 
@@ -469,7 +478,7 @@ fn remove_intersecting_edges_local(
             });
         }
 
-        if segments_intersect(&p, &q, &t.points[new_key.0], &t.points[new_key.1]) {
+        if flipped_edge_crosses_constraint(t, v1, v2, new_key, &mut sides) {
             enqueue_edge(new_key, &mut queue, &mut queued);
         } else {
             newly_created.push(new_key);
@@ -499,6 +508,76 @@ pub fn remove_intersecting_edges(
             .map(|edge| edge_key(t, edge))
             .collect()
     })
+}
+
+/// Classifies a post-flip diagonal with at most one new orientation predicate.
+///
+/// The initial corridor labels every crossed-edge endpoint as left (`+`) or
+/// right (`-`) of the directed constraint. A convex flip exposes one previously
+/// labelled endpoint of the new diagonal and normally one new endpoint. The
+/// four non-degenerate configurations are therefore:
+///
+/// | first side | second side | owner |
+/// |------------|-------------|-------|
+/// | left       | left        | `N`   |
+/// | left       | right       | `Q`   |
+/// | right      | left        | `Q`   |
+/// | right      | right       | `N`   |
+///
+/// Only the missing side is evaluated. Zero sides and a layout where neither
+/// endpoint was labelled are outside this combinatorial truth table and use the
+/// safe full segment-intersection predicate.
+fn flipped_edge_crosses_constraint(
+    t: &Triangulation,
+    v1: usize,
+    v2: usize,
+    diagonal: (usize, usize),
+    sides: &mut HashMap<usize, i8>,
+) -> bool {
+    let p = &t.points[v1];
+    let q = &t.points[v2];
+    let known_a = sides.get(&diagonal.0).copied();
+    let known_b = sides.get(&diagonal.1).copied();
+    let optimized = match (known_a, known_b) {
+        (Some(a), Some(b)) if a != 0 && b != 0 => a != b,
+        (Some(a), None) if a != 0 => {
+            let b = orientation_side(p, q, &t.points[diagonal.1]);
+            sides.insert(diagonal.1, b);
+            if b == 0 {
+                segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1])
+            } else {
+                a != b
+            }
+        }
+        (None, Some(b)) if b != 0 => {
+            let a = orientation_side(p, q, &t.points[diagonal.0]);
+            sides.insert(diagonal.0, a);
+            if a == 0 {
+                segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1])
+            } else {
+                a != b
+            }
+        }
+        _ => segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1]),
+    };
+    debug_assert_eq!(
+        optimized,
+        segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1]),
+        "one-orientation flip classification disagrees with full predicate"
+    );
+    optimized
+}
+
+/// Converts an exact orientation determinant to its combinatorial side label.
+fn orientation_side(a: &Point, b: &Point, p: &Point) -> i8 {
+    let determinant = orient2d(a, b, p);
+    if determinant > 0.0 {
+        1
+    } else if determinant < 0.0 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// Returns a local edge's normalized physical vertex pair.
@@ -897,6 +976,41 @@ mod tests {
         incidence.refresh(&t, [0, 1]);
         for vertex in 0..t.points.len() {
             assert!(t.triangle_vertices[incidence.triangles[vertex]].contains(&vertex));
+        }
+    }
+
+    #[test]
+    fn flipped_edge_four_configuration_truth_table() {
+        let mut t = Triangulation::new();
+        t.points = vec![
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [1.0, 1.0],
+            [3.0, 1.0],
+            [1.0, -1.0],
+            [3.0, -1.0],
+        ];
+        let cases = [
+            ((2, 3), false),
+            ((2, 4), true),
+            ((4, 2), true),
+            ((4, 5), false),
+        ];
+        for (diagonal, expected) in cases {
+            let mut sides = HashMap::from([
+                (
+                    diagonal.0,
+                    orientation_side(&t.points[0], &t.points[1], &t.points[diagonal.0]),
+                ),
+                (
+                    diagonal.1,
+                    orientation_side(&t.points[0], &t.points[1], &t.points[diagonal.1]),
+                ),
+            ]);
+            assert_eq!(
+                flipped_edge_crosses_constraint(&t, 0, 1, diagonal, &mut sides),
+                expected
+            );
         }
     }
 
