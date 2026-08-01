@@ -1,9 +1,165 @@
 use std::collections::VecDeque;
 
 use crate::geometry::{incircle, orient2d, point_in_triangle, PointInTriangle};
-use crate::topology::{find_shared_edge, swap_diagonal};
+#[cfg(test)]
+use crate::topology::find_shared_edge;
 use crate::triangulation::Triangulation;
 use crate::types::{Point, NO_NEIGHBOR};
+
+/// A directed view of one triangle edge, identified by its opposite vertex.
+///
+/// `local` is the local vertex index in `triangle`; consequently the edge is
+/// formed by the other two local vertices and its adjacent triangle is stored
+/// in `triangle_neighbors[triangle][local]`. This representation makes all
+/// topology access constant-time and avoids constructing temporary vertex
+/// sets when two adjacent triangles are inspected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalEdge {
+    triangle: usize,
+    local: usize,
+}
+
+impl LocalEdge {
+    /// Returns the edge endpoints in the triangle's cyclic (CCW) order.
+    fn vertices(self, t: &Triangulation) -> (usize, usize) {
+        let next = self.next();
+        (next.opposite(t), next.next().opposite(t))
+    }
+
+    /// Returns the vertex opposite the represented edge.
+    fn opposite(self, t: &Triangulation) -> usize {
+        t.triangle_vertices[self.triangle][self.local]
+    }
+
+    /// Returns the adjacent triangle, if this is not a hull edge.
+    fn neighbor(self, t: &Triangulation) -> Option<usize> {
+        let neighbor = t.triangle_neighbors[self.triangle][self.local];
+        (neighbor != NO_NEIGHBOR).then_some(neighbor)
+    }
+
+    /// Rotates the handle counter-clockwise to the next edge of its triangle.
+    fn next(self) -> Self {
+        Self {
+            triangle: self.triangle,
+            local: (self.local + 1) % 3,
+        }
+    }
+
+    /// Finds the reciprocal local handle in the adjacent triangle.
+    fn across(self, t: &Triangulation) -> Option<Self> {
+        let neighbor = self.neighbor(t)?;
+        let local = t.triangle_neighbors[neighbor]
+            .iter()
+            .position(|&candidate| candidate == self.triangle)?;
+        Some(Self {
+            triangle: neighbor,
+            local,
+        })
+    }
+}
+
+/// Result of flipping the edge designated by a [`LocalEdge`].
+#[derive(Clone, Copy, Debug)]
+struct FlipResult {
+    /// The new diagonal as owned by the first rewritten triangle.
+    diagonal: LocalEdge,
+    /// The same diagonal as owned by the second rewritten triangle.
+    diagonal_twin: LocalEdge,
+}
+
+/// Replaces a designated shared edge by the other diagonal of its quadrilateral.
+///
+/// Rotate the first triangle to `[c,u,v]` and its neighbor to `[d,v,u]`, where
+/// `u-v` is the designated edge. The result is `[c,d,v]` and `[c,u,d]`.
+/// Triangle indices are stable, and only the two outside neighbors whose owner
+/// changes need reciprocal-link repairs. Both returned handles designate the
+/// new `c-d` diagonal.
+fn flip_designated_edge(t: &mut Triangulation, edge: LocalEdge) -> Option<FlipResult> {
+    let twin = edge.across(t)?;
+    let a = edge.triangle;
+    let b = twin.triangle;
+    let av = t.triangle_vertices[a];
+    let an = t.triangle_neighbors[a];
+    let bv = t.triangle_vertices[b];
+    let bn = t.triangle_neighbors[b];
+    let ia = edge.local;
+    let ib = twin.local;
+
+    let c = av[ia];
+    let u = av[(ia + 1) % 3];
+    let v = av[(ia + 2) % 3];
+    let d = bv[ib];
+    // The adjacent CCW triangle sees the shared edge in reverse.
+    debug_assert_eq!(bv[(ib + 1) % 3], v);
+    debug_assert_eq!(bv[(ib + 2) % 3], u);
+
+    let a_across_u = an[(ia + 1) % 3]; // old edge v-c
+    let a_across_v = an[(ia + 2) % 3]; // old edge c-u
+    let b_across_v = bn[(ib + 1) % 3]; // old edge u-d
+    let b_across_u = bn[(ib + 2) % 3]; // old edge d-v
+
+    t.triangle_vertices[a] = [c, d, v];
+    t.triangle_neighbors[a] = [b_across_u, a_across_u, b];
+    t.triangle_vertices[b] = [c, u, d];
+    t.triangle_neighbors[b] = [b_across_v, a, a_across_v];
+
+    // These are the only boundary edges that changed triangle ownership.
+    replace_neighbor(t, b_across_u, b, a);
+    replace_neighbor(t, a_across_v, a, b);
+
+    Some(FlipResult {
+        diagonal: LocalEdge {
+            triangle: a,
+            local: 2,
+        },
+        diagonal_twin: LocalEdge {
+            triangle: b,
+            local: 1,
+        },
+    })
+}
+
+/// Updates one reciprocal neighbor reference, ignoring a hull sentinel.
+fn replace_neighbor(t: &mut Triangulation, triangle: usize, old: usize, new: usize) {
+    if triangle == NO_NEIGHBOR {
+        return;
+    }
+    let slot = t.triangle_neighbors[triangle]
+        .iter_mut()
+        .find(|neighbor| **neighbor == old)
+        .expect("topology invariant: outside neighbor must reference old owner");
+    *slot = new;
+}
+
+/// Resolves an adjacent triangle pair to the edge owned by `tri_a`.
+fn local_edge_between(t: &Triangulation, tri_a: usize, tri_b: usize) -> Option<LocalEdge> {
+    let local = t
+        .triangle_neighbors
+        .get(tri_a)?
+        .iter()
+        .position(|&n| n == tri_b)?;
+    Some(LocalEdge {
+        triangle: tri_a,
+        local,
+    })
+}
+
+/// Tests strict convexity using the four vertices around a local edge.
+fn local_quadrilateral_is_convex(t: &Triangulation, edge: LocalEdge) -> bool {
+    let Some(twin) = edge.across(t) else {
+        return false;
+    };
+    let (u, v) = edge.vertices(t);
+    let c = edge.opposite(t);
+    let d = twin.opposite(t);
+
+    orient2d(&t.points[u], &t.points[v], &t.points[c])
+        * orient2d(&t.points[u], &t.points[v], &t.points[d])
+        < 0.0
+        && orient2d(&t.points[c], &t.points[d], &t.points[u])
+            * orient2d(&t.points[c], &t.points[d], &t.points[v])
+            < 0.0
+}
 
 /// Test if segments (p1,p2) and (p3,p4) properly intersect (not touching at endpoints).
 /// Port from Python constrained.py:segments_intersect
@@ -33,46 +189,7 @@ pub fn segments_intersect(p1: &Point, p2: &Point, p3: &Point, p4: &Point) -> boo
 /// tri_a and tri_b must share exactly one edge.
 /// Port from Python constrained.py:is_quadrilateral_convex (4-vertex version).
 pub fn is_quadrilateral_convex(t: &Triangulation, tri_a: usize, tri_b: usize) -> bool {
-    let va = t.triangle_vertices[tri_a];
-    let vb = t.triangle_vertices[tri_b];
-
-    // Find shared edge
-    let shared: Vec<usize> = va.iter().copied().filter(|v| vb.contains(v)).collect();
-    if shared.len() != 2 {
-        return false;
-    }
-    let (vk, vl) = (shared[0], shared[1]);
-    let vm = va
-        .iter()
-        .copied()
-        .find(|&v| v != vk && v != vl)
-        .expect("invariant: triangle A must have one opposite vertex");
-    let vn = vb
-        .iter()
-        .copied()
-        .find(|&v| v != vk && v != vl)
-        .expect("invariant: triangle B must have one opposite vertex");
-
-    let pk = &t.points[vk];
-    let pl = &t.points[vl];
-    let pm = &t.points[vm];
-    let pn = &t.points[vn];
-
-    // vm and vn must be on opposite sides of edge vk-vl
-    let o_vm = orient2d(pk, pl, pm);
-    let o_vn = orient2d(pk, pl, pn);
-    if o_vm * o_vn >= 0.0 {
-        return false;
-    }
-
-    // vk and vl must be on opposite sides of edge vm-vn
-    let o_vk = orient2d(pm, pn, pk);
-    let o_vl = orient2d(pm, pn, pl);
-    if o_vk * o_vl >= 0.0 {
-        return false;
-    }
-
-    true
+    local_edge_between(t, tri_a, tri_b).is_some_and(|edge| local_quadrilateral_is_convex(t, edge))
 }
 
 /// Walk the triangulation from v1 toward v2, collecting all triangle edges that
@@ -456,10 +573,12 @@ pub fn remove_intersecting_edges(
 
         let mut candidate = Some((tri_a, tri_b));
         while let Some((cand_a, cand_b)) = candidate {
-            if is_quadrilateral_convex(t, cand_a, cand_b) {
-                swap_diagonal(t, cand_a, cand_b);
+            let designated = local_edge_between(t, cand_a, cand_b)?;
+            if local_quadrilateral_is_convex(t, designated) {
+                let flipped = flip_designated_edge(t, designated)?;
+                debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
 
-                let (new_v1, new_v2) = find_shared_edge(t, cand_a, cand_b)?;
+                let (new_v1, new_v2) = flipped.diagonal.vertices(t);
                 let new_edge = Triangulation::edge_key(new_v1, new_v2);
                 if new_edge == constraint_edge {
                     return Some(newly_created);
@@ -562,10 +681,13 @@ fn restore_delaunay_edges(
             let d = t.points[vn];
 
             if incircle(&a, &b, &c, &d) > 0.0 {
-                swap_diagonal(t, tri_a, tri_b);
-                let Some((new_v1, new_v2)) = find_shared_edge(t, tri_a, tri_b) else {
+                let Some(designated) = local_edge_between(t, tri_a, tri_b) else {
                     return false;
                 };
+                let Some(flipped) = flip_designated_edge(t, designated) else {
+                    return false;
+                };
+                let (new_v1, new_v2) = flipped.diagonal.vertices(t);
                 next_edges.push(Triangulation::edge_key(new_v1, new_v2));
                 swapped = true;
             } else {
@@ -755,6 +877,27 @@ mod tests {
             .iter()
             .position(|&candidate| candidate == point)
             .expect("point must exist in triangulation")
+    }
+
+    #[test]
+    fn local_edge_rotation_mapping_and_flip() {
+        let mut t = two_tri_quad();
+        let edge = local_edge_between(&t, 0, 1).expect("triangles are adjacent");
+        assert_eq!(edge.vertices(&t), (2, 0));
+        assert_eq!(edge.opposite(&t), 1);
+        assert_eq!(edge.next().opposite(&t), 2);
+        assert_eq!(edge.across(&t).unwrap().across(&t), Some(edge));
+
+        let flipped = flip_designated_edge(&mut t, edge).expect("square is flippable");
+        assert_eq!(
+            Triangulation::edge_key(
+                flipped.diagonal.vertices(&t).0,
+                flipped.diagonal.vertices(&t).1
+            ),
+            (1, 3)
+        );
+        assert_eq!(flipped.diagonal.across(&t), Some(flipped.diagonal_twin));
+        assert_neighbors_consistent(&t);
     }
 
     #[test]
