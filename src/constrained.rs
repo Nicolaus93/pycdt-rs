@@ -36,6 +36,57 @@ impl IncidentMap {
     }
 }
 
+/// Reusable insertion/restoration buffers for one constraint batch.
+///
+/// Membership is live only when an edge's stored generation equals the current
+/// generation. Starting a phase therefore clears marks in O(1); on generation
+/// wrap the map is physically cleared before generation one is reused.
+struct ConstraintWorkspace {
+    incidence: IncidentMap,
+    queue: VecDeque<(usize, usize)>,
+    handles: HashMap<(usize, usize), LocalEdge>,
+    marks: HashMap<(usize, usize), u32>,
+    generation: u32,
+    sides: HashMap<usize, i8>,
+}
+impl ConstraintWorkspace {
+    /// Creates batch-lifetime storage and the persistent incidence map.
+    fn new(t: &Triangulation) -> Self {
+        Self {
+            incidence: IncidentMap::new(t),
+            queue: VecDeque::new(),
+            handles: HashMap::new(),
+            marks: HashMap::new(),
+            generation: 0,
+            sides: HashMap::new(),
+        }
+    }
+    /// Begins a phase while retaining buffer capacities.
+    fn begin_phase(&mut self) {
+        self.queue.clear();
+        self.handles.clear();
+        self.sides.clear();
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.clear();
+            self.generation = 1;
+        }
+    }
+    /// Gives a physical edge one live queue owner.
+    fn enqueue(&mut self, edge: (usize, usize)) {
+        if self.marks.get(&edge).copied() != Some(self.generation) {
+            self.marks.insert(edge, self.generation);
+            self.queue.push_back(edge);
+        }
+    }
+    /// Pops and releases one queue owner.
+    fn pop(&mut self) -> Option<(usize, usize)> {
+        let edge = self.queue.pop_front()?;
+        self.marks.insert(edge, 0);
+        Some(edge)
+    }
+}
+
 /// A directed view of one triangle edge, identified by its opposite vertex.
 ///
 /// `local` is the local vertex index in `triangle`; consequently the edge is
@@ -396,103 +447,83 @@ fn remove_intersecting_edges_local(
     v1: usize,
     v2: usize,
     edges: Vec<(usize, usize)>,
-    incidence: &mut IncidentMap,
+    work: &mut ConstraintWorkspace,
 ) -> Option<RemovedEdges> {
     if edges.is_empty() {
         return Some(RemovedEdges {
             newly_created: Vec::new(),
         });
     }
-
+    work.begin_phase();
     let p = t.points[v1];
     let q = t.points[v2];
-    let constraint_edge = Triangulation::edge_key(v1, v2);
-    let mut newly_created = Vec::new();
-    let mut queue = VecDeque::with_capacity(edges.len());
-    let mut queued = HashSet::with_capacity(edges.len());
-    let mut handles = HashMap::with_capacity(edges.len() * 2);
-    let mut sides = HashMap::with_capacity(edges.len() * 2 + 2);
-    sides.insert(v1, 0);
-    sides.insert(v2, 0);
-
-    // The segment walk orders the crossed edges, but the flip algorithm only
-    // needs queue ownership. Seed each physical edge exactly once.
-    for (tri_a, tri_b) in edges {
-        let handle = local_edge_between(t, tri_a, tri_b)?;
-        let key = edge_key(t, handle);
-        handles.insert(key, handle);
-        sides
+    let target = Triangulation::edge_key(v1, v2);
+    let mut new_edges = Vec::new();
+    work.sides.insert(v1, 0);
+    work.sides.insert(v2, 0);
+    for (ta, tb) in edges {
+        let h = local_edge_between(t, ta, tb)?;
+        let key = edge_key(t, h);
+        work.handles.insert(key, h);
+        work.sides
             .entry(key.0)
             .or_insert_with(|| orientation_side(&p, &q, &t.points[key.0]));
-        sides
+        work.sides
             .entry(key.1)
             .or_insert_with(|| orientation_side(&p, &q, &t.points[key.1]));
-        enqueue_edge(key, &mut queue, &mut queued);
+        work.enqueue(key);
     }
-
-    let mut flips = 0usize;
-    let mut deferred = 0usize;
-    let flip_limit = t.triangle_vertices.len().saturating_mul(32).max(32);
-
-    while let Some(key) = queue.pop_front() {
-        queued.remove(&key);
-        let handle = *handles.get(&key)?;
-        if edge_key(t, handle) != key {
+    let mut flips = 0;
+    let mut deferred = 0;
+    let limit = t.triangle_vertices.len().saturating_mul(32).max(32);
+    while let Some(key) = work.pop() {
+        let h = *work.handles.get(&key)?;
+        if edge_key(t, h) != key {
             return None;
         }
-
-        if !local_quadrilateral_is_convex(t, handle) {
-            enqueue_edge(key, &mut queue, &mut queued);
+        if !local_quadrilateral_is_convex(t, h) {
+            work.enqueue(key);
             deferred += 1;
-            // A complete pass without a flip means no queued diagonal can be
-            // removed by the combinatorial flip algorithm.
-            if deferred >= queue.len() {
+            if deferred >= work.queue.len() {
                 return None;
             }
             continue;
         }
-
-        let first_triangle = handle.triangle;
-        let second_triangle = handle.neighbor(t)?;
-        let flipped = flip_designated_edge(t, handle)?;
-        incidence.refresh(t, [first_triangle, second_triangle]);
-        debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
+        let changed = [h.triangle, h.neighbor(t)?];
+        let f = flip_designated_edge(t, h)?;
+        work.incidence.refresh(t, changed);
+        debug_assert_eq!(f.diagonal.across(t), Some(f.diagonal_twin));
         flips += 1;
         deferred = 0;
-        if flips > flip_limit {
+        if flips > limit {
             return None;
         }
-
-        // Boundary edges survive the flip but may change triangle ownership.
-        // Refresh only tracked edges visible in the rewritten pair.
-        refresh_local_handles(t, [first_triangle, second_triangle], &mut handles);
-        let new_key = edge_key(t, flipped.diagonal);
-        handles.insert(new_key, flipped.diagonal);
-
-        if new_key == constraint_edge {
-            return Some(RemovedEdges {
-                newly_created: newly_created
-                    .into_iter()
-                    .filter_map(|key| handles.get(&key).copied())
-                    .collect(),
-            });
+        refresh_local_handles(t, changed, &mut work.handles);
+        let nk = edge_key(t, f.diagonal);
+        work.handles.insert(nk, f.diagonal);
+        if nk == target {
+            return Some(resolve_removed(new_edges, &work.handles));
         }
-
-        if flipped_edge_crosses_constraint(t, v1, v2, new_key, &mut sides) {
-            enqueue_edge(new_key, &mut queue, &mut queued);
+        if flipped_edge_crosses_constraint(t, v1, v2, nk, &mut work.sides) {
+            work.enqueue(nk)
         } else {
-            newly_created.push(new_key);
+            new_edges.push(nk)
         }
     }
-
-    Some(RemovedEdges {
-        newly_created: newly_created
+    Some(resolve_removed(new_edges, &work.handles))
+}
+/// Resolves stable new-edge keys to their current local handles.
+fn resolve_removed(
+    keys: Vec<(usize, usize)>,
+    handles: &HashMap<(usize, usize), LocalEdge>,
+) -> RemovedEdges {
+    RemovedEdges {
+        newly_created: keys
             .into_iter()
             .filter_map(|key| handles.get(&key).copied())
             .collect(),
-    })
+    }
 }
-
 /// Removes intersecting edges while preserving the historical public result.
 pub fn remove_intersecting_edges(
     t: &mut Triangulation,
@@ -500,12 +531,11 @@ pub fn remove_intersecting_edges(
     v2: usize,
     edges: Vec<(usize, usize)>,
 ) -> Option<Vec<(usize, usize)>> {
-    let mut incidence = IncidentMap::new(t);
-    remove_intersecting_edges_local(t, v1, v2, edges, &mut incidence).map(|removed| {
-        removed
-            .newly_created
+    let mut work = ConstraintWorkspace::new(t);
+    remove_intersecting_edges_local(t, v1, v2, edges, &mut work).map(|r| {
+        r.newly_created
             .into_iter()
-            .map(|edge| edge_key(t, edge))
+            .map(|h| edge_key(t, h))
             .collect()
     })
 }
@@ -586,17 +616,6 @@ fn edge_key(t: &Triangulation, edge: LocalEdge) -> (usize, usize) {
     Triangulation::edge_key(a, b)
 }
 
-/// Adds an edge to `Q` if no live entry already owns it.
-fn enqueue_edge(
-    edge: (usize, usize),
-    queue: &mut VecDeque<(usize, usize)>,
-    queued: &mut HashSet<(usize, usize)>,
-) {
-    if queued.insert(edge) {
-        queue.push_back(edge);
-    }
-}
-
 /// Refreshes tracked local owners from a constant-size rewritten neighborhood.
 fn refresh_local_handles(
     t: &Triangulation,
@@ -640,62 +659,53 @@ pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (
 fn restore_delaunay_edges(
     t: &mut Triangulation,
     edges: Vec<LocalEdge>,
-    incidence: &mut IncidentMap,
+    work: &mut ConstraintWorkspace,
 ) -> bool {
-    let mut queue = VecDeque::with_capacity(edges.len());
-    let mut queued = HashSet::with_capacity(edges.len());
-    let mut handles = HashMap::with_capacity(edges.len() * 2);
-    for handle in edges {
-        let key = edge_key(t, handle);
-        handles.insert(key, handle);
-        enqueue_edge(key, &mut queue, &mut queued);
+    work.begin_phase();
+    for h in edges {
+        let key = edge_key(t, h);
+        work.handles.insert(key, h);
+        work.enqueue(key);
     }
-
-    let mut flips = 0usize;
-    let flip_limit = t.triangle_vertices.len().saturating_mul(32).max(32);
-    while let Some(key) = queue.pop_front() {
-        queued.remove(&key);
+    let mut flips = 0;
+    let limit = t.triangle_vertices.len().saturating_mul(32).max(32);
+    while let Some(key) = work.pop() {
         if t.constrained_edges.contains(&key) {
             continue;
         }
-        let Some(handle) = handles.get(&key).copied() else {
+        let Some(h) = work.handles.get(&key).copied() else {
             return false;
         };
-        if edge_key(t, handle) != key {
+        if edge_key(t, h) != key {
             return false;
         }
-        let Some(twin) = handle.across(t) else {
-            continue;
-        };
-        if !local_quadrilateral_is_convex(t, handle) {
+        let Some(twin) = h.across(t) else { continue };
+        if !local_quadrilateral_is_convex(t, h) {
             continue;
         }
-
-        let vertices = t.triangle_vertices[handle.triangle];
+        let v = t.triangle_vertices[h.triangle];
         if incircle(
-            &t.points[vertices[0]],
-            &t.points[vertices[1]],
-            &t.points[vertices[2]],
+            &t.points[v[0]],
+            &t.points[v[1]],
+            &t.points[v[2]],
             &t.points[twin.opposite(t)],
         ) <= 0.0
         {
             continue;
         }
-
-        let triangles = [handle.triangle, twin.triangle];
-        let Some(flipped) = flip_designated_edge(t, handle) else {
+        let changed = [h.triangle, twin.triangle];
+        let Some(f) = flip_designated_edge(t, h) else {
             return false;
         };
-        incidence.refresh(t, triangles);
-        debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
-        refresh_local_handles(t, triangles, &mut handles);
-        let new_key = edge_key(t, flipped.diagonal);
-        handles.insert(new_key, flipped.diagonal);
-        if !t.constrained_edges.contains(&new_key) {
-            enqueue_edge(new_key, &mut queue, &mut queued);
+        work.incidence.refresh(t, changed);
+        refresh_local_handles(t, changed, &mut work.handles);
+        let nk = edge_key(t, f.diagonal);
+        work.handles.insert(nk, f.diagonal);
+        if !t.constrained_edges.contains(&nk) {
+            work.enqueue(nk)
         }
         flips += 1;
-        if flips > flip_limit {
+        if flips > limit {
             return false;
         }
     }
@@ -704,13 +714,13 @@ fn restore_delaunay_edges(
 
 /// Adds constraints, representing every logical segment by physical subedges.
 pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) -> bool {
-    let mut incidence = IncidentMap::new(t);
+    let mut work = ConstraintWorkspace::new(t);
     for &(v1, v2) in constraints {
         let Some(chain) = constraint_vertex_chain(t, v1, v2) else {
             return false;
         };
         for endpoints in chain.windows(2) {
-            if !insert_constraint_subedge(t, endpoints[0], endpoints[1], &mut incidence) {
+            if !insert_constraint_subedge(t, endpoints[0], endpoints[1], &mut work) {
                 return false;
             }
         }
@@ -723,10 +733,10 @@ fn insert_constraint_subedge(
     t: &mut Triangulation,
     v1: usize,
     v2: usize,
-    incidence: &mut IncidentMap,
+    work: &mut ConstraintWorkspace,
 ) -> bool {
     let constraint_edge = Triangulation::edge_key(v1, v2);
-    let Some(intersecting) = find_intersecting_edges_from(t, v1, v2, incidence) else {
+    let Some(intersecting) = find_intersecting_edges_from(t, v1, v2, &work.incidence) else {
         return false;
     };
     let newly_created = if intersecting.is_empty() {
@@ -734,14 +744,13 @@ fn insert_constraint_subedge(
             newly_created: Vec::new(),
         }
     } else {
-        let Some(removed) = remove_intersecting_edges_local(t, v1, v2, intersecting, incidence)
-        else {
+        let Some(removed) = remove_intersecting_edges_local(t, v1, v2, intersecting, work) else {
             return false;
         };
         removed
     };
     t.constrained_edges.insert(constraint_edge);
-    restore_delaunay_edges(t, newly_created.newly_created, incidence)
+    restore_delaunay_edges(t, newly_created.newly_created, work)
 }
 
 /// Returns all existing vertices on a segment in endpoint-to-endpoint order.
@@ -946,13 +955,18 @@ mod tests {
     }
 
     #[test]
-    fn queue_membership_has_single_owner() {
-        let mut queue = VecDeque::new();
-        let mut queued = HashSet::new();
-        enqueue_edge((2, 5), &mut queue, &mut queued);
-        enqueue_edge((2, 5), &mut queue, &mut queued);
-        assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec![(2, 5)]);
-        assert_eq!(queued.len(), 1);
+    fn queue_generations_have_single_owner_and_reuse_storage() {
+        let t = two_tri_quad();
+        let mut work = ConstraintWorkspace::new(&t);
+        work.begin_phase();
+        work.enqueue((2, 5));
+        work.enqueue((2, 5));
+        assert_eq!(work.queue.len(), 1);
+        let capacity = work.queue.capacity();
+        work.begin_phase();
+        work.enqueue((2, 5));
+        assert_eq!(work.queue.len(), 1);
+        assert!(work.queue.capacity() >= capacity);
     }
 
     #[test]
@@ -962,8 +976,8 @@ mod tests {
         let key = edge_key(&t, handle);
         t.constrained_edges.insert(key);
         let before = t.triangle_vertices.clone();
-        let mut incidence = IncidentMap::new(&t);
-        assert!(restore_delaunay_edges(&mut t, vec![handle], &mut incidence));
+        let mut work = ConstraintWorkspace::new(&t);
+        assert!(restore_delaunay_edges(&mut t, vec![handle], &mut work));
         assert_eq!(t.triangle_vertices, before);
     }
 
