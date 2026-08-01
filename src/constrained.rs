@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::geometry::{incircle, orient2d, point_in_triangle, PointInTriangle};
 #[cfg(test)]
@@ -548,6 +548,13 @@ fn point_in_segment_bbox(a: &Point, b: &Point, p: &Point) -> bool {
     p[0] >= min_x - EPS && p[0] <= max_x + EPS && p[1] >= min_y - EPS && p[1] <= max_y + EPS
 }
 
+/// Removes crossed edges with an incrementally updated queue.
+///
+/// `Q` owns physical edge keys, so a queued edge remains identifiable when a
+/// neighboring flip moves it to another triangle slot. `handles` maps those
+/// keys back to their current local owner. A flip refreshes this map by looking
+/// only at the six slots of its two rewritten triangles. `queued` guarantees
+/// that every physical edge has at most one live queue entry.
 pub fn remove_intersecting_edges(
     t: &mut Triangulation,
     v1: usize,
@@ -555,65 +562,110 @@ pub fn remove_intersecting_edges(
     edges: Vec<(usize, usize)>,
 ) -> Option<Vec<(usize, usize)>> {
     if edges.is_empty() {
-        return Some(vec![]);
+        return Some(Vec::new());
     }
 
     let p = t.points[v1];
     let q = t.points[v2];
     let constraint_edge = Triangulation::edge_key(v1, v2);
     let mut newly_created = Vec::new();
-    let max_iterations = edges.len().max(1) * 10;
+    let mut queue = VecDeque::with_capacity(edges.len());
+    let mut queued = HashSet::with_capacity(edges.len());
+    let mut handles = HashMap::with_capacity(edges.len() * 2);
 
-    let mut intersecting: VecDeque<(usize, usize)> = edges.into();
+    // The segment walk orders the crossed edges, but the flip algorithm only
+    // needs queue ownership. Seed each physical edge exactly once.
+    for (tri_a, tri_b) in edges {
+        let handle = local_edge_between(t, tri_a, tri_b)?;
+        let key = edge_key(t, handle);
+        handles.insert(key, handle);
+        enqueue_edge(key, &mut queue, &mut queued);
+    }
 
-    for _ in 0..max_iterations {
-        let Some((tri_a, tri_b)) = intersecting.pop_front() else {
-            break;
-        };
+    let mut flips = 0usize;
+    let mut deferred = 0usize;
+    let flip_limit = t.triangle_vertices.len().saturating_mul(32).max(32);
 
-        let mut candidate = Some((tri_a, tri_b));
-        while let Some((cand_a, cand_b)) = candidate {
-            let designated = local_edge_between(t, cand_a, cand_b)?;
-            if local_quadrilateral_is_convex(t, designated) {
-                let flipped = flip_designated_edge(t, designated)?;
-                debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
-
-                let (new_v1, new_v2) = flipped.diagonal.vertices(t);
-                let new_edge = Triangulation::edge_key(new_v1, new_v2);
-                if new_edge == constraint_edge {
-                    return Some(newly_created);
-                }
-
-                if !segments_intersect(&p, &q, &t.points[new_edge.0], &t.points[new_edge.1]) {
-                    newly_created.push(new_edge);
-                }
-
-                candidate = None;
-                break;
-            }
-
-            candidate = intersecting.pop_front();
-        }
-
-        if candidate.is_some() {
+    while let Some(key) = queue.pop_front() {
+        queued.remove(&key);
+        let handle = *handles.get(&key)?;
+        if edge_key(t, handle) != key {
             return None;
         }
 
-        // A diagonal flip changes the local topology. Walk the updated
-        // triangulation from v1 toward v2 instead of rescanning every edge.
-        intersecting = match find_intersecting_edges(t, v1, v2) {
-            Some(edges) => edges.into(),
-            None => {
+        if !local_quadrilateral_is_convex(t, handle) {
+            enqueue_edge(key, &mut queue, &mut queued);
+            deferred += 1;
+            // A complete pass without a flip means no queued diagonal can be
+            // removed by the combinatorial flip algorithm.
+            if deferred >= queue.len() {
                 return None;
             }
-        };
-    }
+            continue;
+        }
 
-    if !find_intersecting_edges(t, v1, v2)?.is_empty() {
-        return None;
+        let first_triangle = handle.triangle;
+        let second_triangle = handle.neighbor(t)?;
+        let flipped = flip_designated_edge(t, handle)?;
+        debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
+        flips += 1;
+        deferred = 0;
+        if flips > flip_limit {
+            return None;
+        }
+
+        // Boundary edges survive the flip but may change triangle ownership.
+        // Refresh only tracked edges visible in the rewritten pair.
+        refresh_local_handles(t, [first_triangle, second_triangle], &mut handles);
+        let new_key = edge_key(t, flipped.diagonal);
+        handles.insert(new_key, flipped.diagonal);
+
+        if new_key == constraint_edge {
+            return Some(newly_created);
+        }
+
+        if segments_intersect(&p, &q, &t.points[new_key.0], &t.points[new_key.1]) {
+            enqueue_edge(new_key, &mut queue, &mut queued);
+        } else {
+            newly_created.push(new_key);
+        }
     }
 
     Some(newly_created)
+}
+
+/// Returns a local edge's normalized physical vertex pair.
+fn edge_key(t: &Triangulation, edge: LocalEdge) -> (usize, usize) {
+    let (a, b) = edge.vertices(t);
+    Triangulation::edge_key(a, b)
+}
+
+/// Adds an edge to `Q` if no live entry already owns it.
+fn enqueue_edge(
+    edge: (usize, usize),
+    queue: &mut VecDeque<(usize, usize)>,
+    queued: &mut HashSet<(usize, usize)>,
+) {
+    if queued.insert(edge) {
+        queue.push_back(edge);
+    }
+}
+
+/// Refreshes tracked local owners from a constant-size rewritten neighborhood.
+fn refresh_local_handles(
+    t: &Triangulation,
+    triangles: [usize; 2],
+    handles: &mut HashMap<(usize, usize), LocalEdge>,
+) {
+    for triangle in triangles {
+        for local in 0..3 {
+            let handle = LocalEdge { triangle, local };
+            let key = edge_key(t, handle);
+            if handles.contains_key(&key) {
+                handles.insert(key, handle);
+            }
+        }
+    }
 }
 
 pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (usize, usize) {
@@ -898,6 +950,16 @@ mod tests {
         );
         assert_eq!(flipped.diagonal.across(&t), Some(flipped.diagonal_twin));
         assert_neighbors_consistent(&t);
+    }
+
+    #[test]
+    fn queue_membership_has_single_owner() {
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
+        enqueue_edge((2, 5), &mut queue, &mut queued);
+        enqueue_edge((2, 5), &mut queue, &mut queued);
+        assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec![(2, 5)]);
+        assert_eq!(queued.len(), 1);
     }
 
     #[test]
