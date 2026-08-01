@@ -6,6 +6,36 @@ use crate::topology::find_shared_edge;
 use crate::triangulation::Triangulation;
 use crate::types::{Point, NO_NEIGHBOR};
 
+/// One current incident triangle for every vertex in a constraint batch.
+///
+/// Construction is one linear pass. Flips keep triangle indices stable, so
+/// refreshing a rewritten pair preserves O(1) walk starts.
+struct IncidentMap {
+    triangles: Vec<usize>,
+}
+
+impl IncidentMap {
+    /// Builds the batch incidence map with one scan of triangle storage.
+    fn new(t: &Triangulation) -> Self {
+        let mut triangles = vec![NO_NEIGHBOR; t.points.len()];
+        for (triangle, vertices) in t.triangle_vertices.iter().enumerate() {
+            for &vertex in vertices {
+                triangles[vertex] = triangle;
+            }
+        }
+        Self { triangles }
+    }
+
+    /// Refreshes incidence for the constant-size neighborhood of a flip.
+    fn refresh(&mut self, t: &Triangulation, changed: [usize; 2]) {
+        for triangle in changed {
+            for &vertex in &t.triangle_vertices[triangle] {
+                self.triangles[vertex] = triangle;
+            }
+        }
+    }
+}
+
 /// A directed view of one triangle edge, identified by its opposite vertex.
 ///
 /// `local` is the local vertex index in `triangle`; consequently the edge is
@@ -199,29 +229,29 @@ pub fn find_intersecting_edges(
     v1: usize,
     v2: usize,
 ) -> Option<Vec<(usize, usize)>> {
+    find_intersecting_edges_from(t, v1, v2, &IncidentMap::new(t))
+}
+
+/// Internal segment walk seeded from the batch incidence map.
+fn find_intersecting_edges_from(
+    t: &Triangulation,
+    v1: usize,
+    v2: usize,
+    incidence: &IncidentMap,
+) -> Option<Vec<(usize, usize)>> {
     let p = t.points[v1];
     let q = t.points[v2];
 
-    // Find all triangles containing v1
-    let tris_with_v1: Vec<usize> = t
-        .triangle_vertices
+    let incident = *incidence.triangles.get(v1)?;
+    if incident == NO_NEIGHBOR {
+        return None;
+    }
+    let tris_with_v1 = vertex_fan_triangles(t, incident, v1);
+    if tris_with_v1
         .iter()
-        .enumerate()
-        .filter_map(|(i, verts)| if verts.contains(&v1) { Some(i) } else { None })
-        .collect();
-
-    let tris_with_v2: Vec<usize> = t
-        .triangle_vertices
-        .iter()
-        .enumerate()
-        .filter_map(|(i, verts)| if verts.contains(&v2) { Some(i) } else { None })
-        .collect();
-
-    // If any triangle contains both v1 and v2, the edge is already in the triangulation
-    for &tri in &tris_with_v1 {
-        if tris_with_v2.contains(&tri) {
-            return Some(vec![]);
-        }
+        .any(|&tri| t.triangle_vertices[tri].contains(&v2))
+    {
+        return Some(Vec::new());
     }
 
     // Start in the incident triangle entered by the segment. The first
@@ -299,6 +329,26 @@ pub fn find_intersecting_edges(
     }
 
     Some(intersecting)
+}
+
+/// Collects the connected triangle fan around one vertex without global scans.
+fn vertex_fan_triangles(t: &Triangulation, start: usize, vertex: usize) -> Vec<usize> {
+    let mut result = Vec::new();
+    let mut queue = VecDeque::from([start]);
+    let mut visited = HashSet::new();
+    while let Some(triangle) = queue.pop_front() {
+        if !visited.insert(triangle) || !t.triangle_vertices[triangle].contains(&vertex) {
+            continue;
+        }
+        result.push(triangle);
+        queue.extend(
+            t.triangle_neighbors[triangle]
+                .iter()
+                .copied()
+                .filter(|&n| n != NO_NEIGHBOR),
+        );
+    }
+    result
 }
 
 /// Case C: check for proper crossing in triangle current_tri
@@ -566,6 +616,7 @@ fn remove_intersecting_edges_local(
     v1: usize,
     v2: usize,
     edges: Vec<(usize, usize)>,
+    incidence: &mut IncidentMap,
 ) -> Option<RemovedEdges> {
     if edges.is_empty() {
         return Some(RemovedEdges {
@@ -615,6 +666,7 @@ fn remove_intersecting_edges_local(
         let first_triangle = handle.triangle;
         let second_triangle = handle.neighbor(t)?;
         let flipped = flip_designated_edge(t, handle)?;
+        incidence.refresh(t, [first_triangle, second_triangle]);
         debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
         flips += 1;
         deferred = 0;
@@ -659,7 +711,8 @@ pub fn remove_intersecting_edges(
     v2: usize,
     edges: Vec<(usize, usize)>,
 ) -> Option<Vec<(usize, usize)>> {
-    remove_intersecting_edges_local(t, v1, v2, edges).map(|removed| {
+    let mut incidence = IncidentMap::new(t);
+    remove_intersecting_edges_local(t, v1, v2, edges, &mut incidence).map(|removed| {
         removed
             .newly_created
             .into_iter()
@@ -725,7 +778,11 @@ pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (
 /// `N` owns stable physical keys while `handles` records their current slots.
 /// A flip refreshes tracked boundary owners from its two rewritten triangles;
 /// no global scan rediscovers an edge. Constrained edges are never flipped.
-fn restore_delaunay_edges(t: &mut Triangulation, edges: Vec<LocalEdge>) -> bool {
+fn restore_delaunay_edges(
+    t: &mut Triangulation,
+    edges: Vec<LocalEdge>,
+    incidence: &mut IncidentMap,
+) -> bool {
     let mut queue = VecDeque::with_capacity(edges.len());
     let mut queued = HashSet::with_capacity(edges.len());
     let mut handles = HashMap::with_capacity(edges.len() * 2);
@@ -770,6 +827,7 @@ fn restore_delaunay_edges(t: &mut Triangulation, edges: Vec<LocalEdge>) -> bool 
         let Some(flipped) = flip_designated_edge(t, handle) else {
             return false;
         };
+        incidence.refresh(t, triangles);
         debug_assert_eq!(flipped.diagonal.across(t), Some(flipped.diagonal_twin));
         refresh_local_handles(t, triangles, &mut handles);
         let new_key = edge_key(t, flipped.diagonal);
@@ -786,9 +844,10 @@ fn restore_delaunay_edges(t: &mut Triangulation, edges: Vec<LocalEdge>) -> bool 
 }
 
 pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) -> bool {
+    let mut incidence = IncidentMap::new(t);
     for &(v1, v2) in constraints {
         let constraint_edge = Triangulation::edge_key(v1, v2);
-        let Some(intersecting) = find_intersecting_edges(t, v1, v2) else {
+        let Some(intersecting) = find_intersecting_edges_from(t, v1, v2, &incidence) else {
             return false;
         };
 
@@ -797,7 +856,8 @@ pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) ->
                 newly_created: Vec::new(),
             }
         } else {
-            let Some(newly_created) = remove_intersecting_edges_local(t, v1, v2, intersecting)
+            let Some(newly_created) =
+                remove_intersecting_edges_local(t, v1, v2, intersecting, &mut incidence)
             else {
                 return false;
             };
@@ -806,7 +866,7 @@ pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) ->
 
         t.constrained_edges.insert(constraint_edge);
 
-        if !restore_delaunay_edges(t, newly_created.newly_created) {
+        if !restore_delaunay_edges(t, newly_created.newly_created, &mut incidence) {
             return false;
         }
     }
@@ -1001,8 +1061,21 @@ mod tests {
         let key = edge_key(&t, handle);
         t.constrained_edges.insert(key);
         let before = t.triangle_vertices.clone();
-        assert!(restore_delaunay_edges(&mut t, vec![handle]));
+        let mut incidence = IncidentMap::new(&t);
+        assert!(restore_delaunay_edges(&mut t, vec![handle], &mut incidence));
         assert_eq!(t.triangle_vertices, before);
+    }
+
+    #[test]
+    fn incidence_map_is_maintained_after_flip() {
+        let mut t = two_tri_quad();
+        let mut incidence = IncidentMap::new(&t);
+        let edge = local_edge_between(&t, 0, 1).unwrap();
+        flip_designated_edge(&mut t, edge).unwrap();
+        incidence.refresh(&t, [0, 1]);
+        for vertex in 0..t.points.len() {
+            assert!(t.triangle_vertices[incidence.triangles[vertex]].contains(&vertex));
+        }
     }
 
     #[test]
