@@ -1,6 +1,7 @@
 # pycdt-rs
 
 [![CI](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Nicolaus93/pycdt-rs/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/Nicolaus93/pycdt-rs?utm_source=badge)
 
 A Rust implementation of 2D Delaunay and constrained Delaunay triangulation.
 
@@ -15,6 +16,7 @@ This lets other Rust projects depend on the triangulation library without pullin
 
 - `src/` — core Rust implementation
 - `tests/` — Rust tests
+- `benches/` — Rust benchmarks, tracked with CodSpeed
 - `python/` — standalone Python extension project built with `maturin`
 - `python/examples/` — Python examples
 
@@ -35,6 +37,26 @@ just fmt-check
 just clippy
 just check
 ```
+
+## Benchmarks
+
+Benchmarks live in [`benches/`](benches) and use
+[divan](https://github.com/nvzqz/divan) through the
+[CodSpeed compatibility layer](https://codspeed.io/docs/benchmarks/rust/divan).
+They are run on every pull request and the results are reported by CodSpeed.
+
+Run them locally with the [CodSpeed CLI](https://codspeed.io/docs/cli):
+
+```bash
+cargo codspeed build
+codspeed run --mode simulation -- cargo codspeed run
+```
+
+Two suites are available:
+
+- `triangulation` — end-to-end triangulation, incremental updates, constrained
+  edge insertion and hole removal
+- `geometry` — the robust predicates and topology helpers on the hot path
 
 Use it from another Rust project as a normal dependency:
 
