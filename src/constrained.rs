@@ -719,6 +719,11 @@ pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) ->
         let Some(chain) = constraint_vertex_chain(t, v1, v2) else {
             return false;
         };
+        match preflight_constraint(t, &chain) {
+            Preflight::Insert => {}
+            Preflight::Duplicate => continue,
+            Preflight::Reject => return false,
+        }
         for endpoints in chain.windows(2) {
             if !insert_constraint_subedge(t, endpoints[0], endpoints[1], &mut work) {
                 return false;
@@ -726,6 +731,69 @@ pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) ->
         }
     }
     true
+}
+
+/// Result of checking one logical constraint against existing constrained edges.
+enum Preflight {
+    Insert,
+    Duplicate,
+    Reject,
+}
+
+/// Validates unsupported interactions before any topology mutation.
+///
+/// A chain is an idempotent duplicate only when every one of its physical
+/// subedges is already constrained. Sharing just part of a chain is a partial
+/// overlap and is rejected, as are proper crossings and a requested endpoint
+/// in the interior of an existing constrained edge (which would require edge
+/// splitting and stable constraint identities not provided by the current API).
+fn preflight_constraint(t: &Triangulation, chain: &[usize]) -> Preflight {
+    let requested: Vec<_> = chain
+        .windows(2)
+        .map(|vertices| Triangulation::edge_key(vertices[0], vertices[1]))
+        .collect();
+    if requested
+        .iter()
+        .all(|edge| t.constrained_edges.contains(edge))
+    {
+        return Preflight::Duplicate;
+    }
+
+    for &candidate in &requested {
+        if t.constrained_edges.contains(&candidate) {
+            return Preflight::Reject;
+        }
+        let a = &t.points[candidate.0];
+        let b = &t.points[candidate.1];
+        for &existing in &t.constrained_edges {
+            let c = &t.points[existing.0];
+            let d = &t.points[existing.1];
+            if segments_intersect(a, b, c, d)
+                || collinear_positive_overlap(a, b, c, d)
+                || point_strictly_between(c, d, a)
+                || point_strictly_between(c, d, b)
+            {
+                return Preflight::Reject;
+            }
+        }
+    }
+    Preflight::Insert
+}
+
+/// Tests whether two collinear closed segments share positive length.
+fn collinear_positive_overlap(a: &Point, b: &Point, c: &Point, d: &Point) -> bool {
+    if orient2d(a, b, c) != 0.0 || orient2d(a, b, d) != 0.0 {
+        return false;
+    }
+    let use_x = (b[0] - a[0]).abs() >= (b[1] - a[1]).abs();
+    let coordinate = |point: &Point| if use_x { point[0] } else { point[1] };
+    let left = coordinate(a)
+        .min(coordinate(b))
+        .max(coordinate(c).min(coordinate(d)));
+    let right = coordinate(a)
+        .max(coordinate(b))
+        .min(coordinate(c).max(coordinate(d)));
+    left < right
 }
 
 /// Inserts one subedge whose open segment contains no triangulation vertex.
@@ -1026,6 +1094,39 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn rejected_crossing_leaves_requested_constraint_unmodified() {
+        let points = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let mut t = triangulate(&points);
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        let vertices = t.triangle_vertices.clone();
+        let neighbors = t.triangle_neighbors.clone();
+        let constrained = t.constrained_edges.clone();
+        assert!(!add_constraints(&mut t, &[(1, 3)]));
+        assert_eq!(t.triangle_vertices, vertices);
+        assert_eq!(t.triangle_neighbors, neighbors);
+        assert_eq!(t.constrained_edges, constrained);
+    }
+
+    #[test]
+    fn duplicate_chain_is_idempotent_and_partial_overlap_is_rejected() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [0.0, 1.0],
+            [3.0, 1.0],
+        ];
+        let mut t = triangulate(&points);
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        let before = t.constrained_edges.clone();
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        assert_eq!(t.constrained_edges, before);
+        assert!(!add_constraints(&mut t, &[(1, 3)]));
+        assert_eq!(t.constrained_edges, before);
     }
 
     #[test]

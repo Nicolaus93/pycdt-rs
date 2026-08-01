@@ -193,8 +193,11 @@ fn test_add_constraints_multiple() {
     let points: &[[f64; 2]] = &[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
     let mut t = triangulate(points);
 
+    // The second diagonal properly crosses the first and is unsupported.
     let success = add_constraints(&mut t, &[(0, 2), (1, 3)]);
-    assert!(success);
+    assert!(!success);
+    assert!(t.constrained_edges.contains(&Triangulation::edge_key(0, 2)));
+    assert!(!t.constrained_edges.contains(&Triangulation::edge_key(1, 3)));
 
     assert!(t.num_triangles() > 0);
     for &[a, b, c] in &t.triangle_vertices {
