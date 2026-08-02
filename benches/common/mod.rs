@@ -1,35 +1,12 @@
 //! Shared deterministic point generators used by the benchmark targets.
 //!
-//! The generators avoid any external RNG dependency so the benchmark inputs are
-//! byte-for-byte reproducible across machines and CI runs.
+//! Seeded RNGs keep benchmark inputs reproducible across machines and CI runs.
 
 // Each benchmark target includes this module and only uses part of it.
 #![allow(dead_code)]
 
 use pycdt_rs::types::Point;
-
-/// Small xorshift64* generator: deterministic and dependency free.
-pub struct Rng(u64);
-
-impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// Uniform value in `[0, 1)`.
-    pub fn next_f64(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// `n` uniformly distributed points inside a 1000x1000 box.
 pub fn uniform_points(n: usize, seed: u64) -> Vec<Point> {
@@ -38,24 +15,23 @@ pub fn uniform_points(n: usize, seed: u64) -> Vec<Point> {
 
 /// `n` uniformly distributed points inside the `[min, max]^2` box.
 pub fn uniform_points_in(n: usize, seed: u64, min: f64, max: f64) -> Vec<Point> {
-    let mut rng = Rng::new(seed);
+    let mut rng = StdRng::seed_from_u64(seed);
     let span = max - min;
     (0..n)
-        .map(|_| [min + rng.next_f64() * span, min + rng.next_f64() * span])
+        .map(|_| [min + rng.gen::<f64>() * span, min + rng.gen::<f64>() * span])
         .collect()
 }
 
-/// A `side x side` regular grid. Highly degenerate input: many collinear points
-/// and cocircular quadruples, which stresses the robust predicates and the
-/// on-edge insertion path.
-pub fn grid_points(side: usize) -> Vec<Point> {
-    let mut points = Vec::with_capacity(side * side);
-    for i in 0..side {
-        for j in 0..side {
-            points.push([i as f64, j as f64]);
-        }
-    }
-    points
+/// `n` points from a nearly square regular grid.
+///
+/// The last row may be incomplete so benchmark arguments remain exact point
+/// counts. The collinear points and cocircular quadruples stress the robust
+/// predicates and the on-edge insertion path.
+pub fn grid_points(n: usize) -> Vec<Point> {
+    let columns = (n as f64).sqrt().ceil() as usize;
+    (0..n)
+        .map(|index| [(index % columns) as f64, (index / columns) as f64])
+        .collect()
 }
 
 /// `n` points evenly spaced on a circle: every point is cocircular with every
@@ -96,9 +72,9 @@ pub fn polygon_with_holes(side: usize, filler: usize) -> (Vec<Point>, Vec<(usize
         }
     }
 
-    let mut rng = Rng::new(0xC0D5_5EED);
+    let mut rng = StdRng::seed_from_u64(0xC0D5_5EED);
     for _ in 0..filler {
-        points.push([rng.next_f64() * extent, rng.next_f64() * extent]);
+        points.push([rng.gen::<f64>() * extent, rng.gen::<f64>() * extent]);
     }
 
     (points, edges)

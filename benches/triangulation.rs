@@ -15,7 +15,7 @@ fn main() {
 
 /// Delaunay triangulation of uniformly distributed points, the most common
 /// workload.
-#[divan::bench(args = [64, 256, 512])]
+#[divan::bench(args = [1_000, 10_000])]
 fn triangulate_uniform(bencher: Bencher, n: usize) {
     let points = uniform_points(n, 0x5EED);
     bencher.bench(|| divan::black_box(triangulate(divan::black_box(&points))));
@@ -23,14 +23,14 @@ fn triangulate_uniform(bencher: Bencher, n: usize) {
 
 /// Regular grid: many collinear points and cocircular quadruples, exercising the
 /// on-edge insertion path and the robust predicates.
-#[divan::bench(args = [8, 16, 22])]
-fn triangulate_grid(bencher: Bencher, side: usize) {
-    let points = grid_points(side);
+#[divan::bench(args = [1_000, 10_000])]
+fn triangulate_grid(bencher: Bencher, n: usize) {
+    let points = grid_points(n);
     bencher.bench(|| divan::black_box(triangulate(divan::black_box(&points))));
 }
 
 /// Points on a circle: fully degenerate for the in-circle predicate.
-#[divan::bench(args = [64, 256])]
+#[divan::bench(args = [1_000, 10_000])]
 fn triangulate_circle(bencher: Bencher, n: usize) {
     let points = circle_points(n, 100.0);
     bencher.bench(|| divan::black_box(triangulate(divan::black_box(&points))));
@@ -41,7 +41,7 @@ fn triangulate_circle(bencher: Bencher, n: usize) {
 /// The super triangle is dropped by `triangulate`, so the extra points are
 /// drawn from a smaller centred box to guarantee they land inside the convex
 /// hull of the base point set.
-#[divan::bench(args = [16, 64])]
+#[divan::bench(args = [100, 1_000])]
 fn update_triangulation_incremental(bencher: Bencher, added: usize) {
     let base = uniform_points(256, 0x5EED);
     let extra = uniform_points_in(added, 0xBEEF, 250.0, 750.0);
@@ -57,14 +57,13 @@ fn update_triangulation_incremental(bencher: Bencher, added: usize) {
 
 /// Constrained edge insertion: each constraint forces edge flips along the
 /// segment it crosses.
-#[divan::bench(args = [1, 8, 32])]
-fn add_constraints_crossing(bencher: Bencher, count: usize) {
-    // Points on a circle, constraints are long chords crossing the interior so
-    // every insertion has to remove and re-triangulate intersecting edges.
-    let n = 128;
+#[divan::bench(args = [100, 1_000])]
+fn add_constraints_crossing(bencher: Bencher, n: usize) {
+    // A diameter of the circle crosses the triangulation interior, forcing
+    // edge flips without introducing intersections between constraints.
     let points = circle_points(n, 100.0);
     let triangulation = triangulate(&points);
-    let constraints: Vec<(usize, usize)> = (0..count).map(|i| (i, (i + n / 2) % n)).collect();
+    let constraints = [(0, n / 2)];
 
     bencher
         .with_inputs(|| triangulation.clone())
@@ -74,11 +73,13 @@ fn add_constraints_crossing(bencher: Bencher, count: usize) {
 }
 
 /// Hole removal: insert the boundary constraints, then discard every triangle
-/// outside the outer polygon or inside a hole. `side` is the number of holes per
-/// row of the `side x side` hole grid.
-#[divan::bench(args = [1, 2, 4])]
-fn remove_holes(bencher: Bencher, side: usize) {
-    let (points, edges) = polygon_with_holes(side, 32 * side);
+/// outside the outer polygon or inside one of four holes.
+#[divan::bench(args = [64, 128])]
+fn remove_holes(bencher: Bencher, n: usize) {
+    const HOLES_PER_ROW: usize = 2;
+    const BOUNDARY_POINTS: usize = 4 + 4 * HOLES_PER_ROW * HOLES_PER_ROW;
+    let (points, edges) = polygon_with_holes(HOLES_PER_ROW, n - BOUNDARY_POINTS);
+    debug_assert_eq!(points.len(), n);
     let triangulation = triangulate(&points);
 
     bencher
