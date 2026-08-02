@@ -15,7 +15,14 @@ crate-type = ["rlib"]
 robust = "1"
 
 [dev-dependencies]
+divan = { version = "5.0.1", package = "codspeed-divan-compat" }
 proptest = "1"
+rand = "0.8"
+
+[[bench]]
+name = "triangulation"
+harness = false
+
 
 [profile.release]
 opt-level = 3
