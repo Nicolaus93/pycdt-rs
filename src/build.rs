@@ -36,7 +36,9 @@ fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
 
     Triangulation {
         points: vec![p0, p1, p2],
-        triangle_vertices: vec![[0, 1, 2]],
+        // Triangle-producing operations preserve CCW winding, so establish
+        // that invariant before the first point-location walk.
+        triangle_vertices: vec![[0, 2, 1]],
         triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
         constrained_edges: Default::default(),
         num_super_triangle_points: 3,
@@ -145,21 +147,17 @@ fn find_containing_triangle_from(
             PointInTriangle::Outside => {}
         }
 
-        let triangle_orientation = orient2d(
-            &t.points[vertices[0]],
-            &t.points[vertices[1]],
-            &t.points[vertices[2]],
-        );
-
         let mut next = None;
         for opposite_vertex in 0..3 {
             let edge_start = vertices[(opposite_vertex + 1) % 3];
             let edge_end = vertices[(opposite_vertex + 2) % 3];
             let edge_orientation = orient2d(&t.points[edge_start], &t.points[edge_end], point);
 
-            // For a consistently oriented triangle, a negative product means
-            // the point lies beyond the edge opposite this vertex.
-            if edge_orientation * triangle_orientation < 0.0 {
+            // Every triangle is stored CCW: initialization establishes that
+            // invariant and all split/flip paths use `ensure_ccw`. Its interior
+            // is therefore left of each directed edge, so a negative sign alone
+            // identifies an exit edge; no triangle-orientation predicate is needed.
+            if edge_orientation < 0.0 {
                 let neighbor = t.triangle_neighbors[current]
                     .iter()
                     .copied()
@@ -710,6 +708,20 @@ mod tests {
             (t.points[a][0] + t.points[b][0] + t.points[c][0]) / 3.0,
             (t.points[a][1] + t.points[b][1] + t.points[c][1]) / 3.0,
         ]
+    }
+
+    #[test]
+    fn initial_super_triangle_is_counterclockwise() {
+        let triangulation = initialize_triangulation(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let [a, b, c] = triangulation.triangle_vertices[0];
+
+        assert!(
+            orient2d(
+                &triangulation.points[a],
+                &triangulation.points[b],
+                &triangulation.points[c]
+            ) > 0.0
+        );
     }
 
     fn two_triangle_triangulation() -> Triangulation {
