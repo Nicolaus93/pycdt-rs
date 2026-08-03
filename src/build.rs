@@ -111,11 +111,8 @@ pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     t
 }
 
-pub fn find_containing_triangle(t: &Triangulation, point: &Point) -> PointLocation {
-    find_containing_triangle_from(t, point, 0)
-}
-
-fn find_containing_triangle_from(
+/// Locate a point by walking from `start_triangle` through adjacent triangles.
+pub fn find_containing_triangle_from(
     t: &Triangulation,
     point: &Point,
     start_triangle: usize,
@@ -805,7 +802,7 @@ mod tests {
         let point = [0.75, 0.25];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::Interior(0)
         );
     }
@@ -816,7 +813,7 @@ mod tests {
         let point = [0.25, 0.75];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::Interior(1)
         );
     }
@@ -838,7 +835,7 @@ mod tests {
         let point = [0.5, 0.5];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::OnEdge(0, 2)
         );
     }
@@ -849,7 +846,7 @@ mod tests {
         let point = [1.5, 0.5];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::NotFound
         );
     }
