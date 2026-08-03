@@ -1,4 +1,4 @@
-use pycdt_rs::build::{find_containing_triangle, triangulate};
+use pycdt_rs::build::{find_containing_triangle_from, triangulate};
 use pycdt_rs::types::{PointLocation, NO_NEIGHBOR};
 use pycdt_rs::Triangulation;
 
@@ -113,7 +113,7 @@ fn test_find_containing_triangle_center() {
     let t = triangulate(points);
 
     let point = [0.5, 0.5];
-    let result = find_containing_triangle(&t, &point);
+    let result = find_containing_triangle_from(&t, &point, 0);
     match result {
         PointLocation::Interior(idx) => assert!(idx < t.num_triangles()),
         PointLocation::OnEdge(idx, _) => assert!(idx < t.num_triangles()),
@@ -128,7 +128,7 @@ fn test_find_containing_triangle_multiple_interior_points() {
 
     let test_pts = [[0.5, 0.5], [1.5, 0.5], [0.5, 1.5], [1.0, 1.0]];
     for p in &test_pts {
-        let result = find_containing_triangle(&t, p);
+        let result = find_containing_triangle_from(&t, p, 0);
         match result {
             PointLocation::Interior(idx) => assert!(idx < t.num_triangles()),
             PointLocation::OnEdge(idx, _) => assert!(idx < t.num_triangles()),
@@ -143,7 +143,7 @@ fn test_find_containing_triangle_near_edge() {
     let t = triangulate(points);
 
     let p = [1.0, 0.1];
-    let result = find_containing_triangle(&t, &p);
+    let result = find_containing_triangle_from(&t, &p, 0);
     match result {
         PointLocation::Interior(idx) | PointLocation::OnEdge(idx, _) => {
             assert!(idx < t.num_triangles())
