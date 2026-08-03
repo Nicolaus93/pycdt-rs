@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use crate::types::{Point, TriangleNeighbors, TriangleVertices, NO_NEIGHBOR};
 
+/// A triangulation whose triangle vertex triples use counterclockwise winding.
+///
+/// Callers that mutate the public topology vectors must preserve this winding
+/// together with the neighbor-index invariants.
 #[derive(Clone)]
 pub struct Triangulation {
     pub points: Vec<Point>,

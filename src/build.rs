@@ -1,4 +1,6 @@
-use crate::geometry::{ensure_ccw, is_point_inside_polygon, point_in_triangle, PointInTriangle};
+use crate::geometry::{
+    ensure_ccw, is_point_inside_polygon, orient2d, point_in_triangle, PointInTriangle,
+};
 use crate::topology::{lawson_swapping, reorder_neighbors};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
@@ -34,7 +36,9 @@ fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
 
     Triangulation {
         points: vec![p0, p1, p2],
-        triangle_vertices: vec![[0, 1, 2]],
+        // Triangle-producing operations preserve CCW winding, so establish
+        // that invariant before the first point-location walk.
+        triangle_vertices: vec![[0, 2, 1]],
         triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
         constrained_edges: Default::default(),
         num_super_triangle_points: 3,
@@ -95,29 +99,83 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
 
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
+    let mut start_triangle = 0;
 
     for &point in input_points {
         t.points.push(point);
         let point_idx = t.points.len() - 1;
-        insert_point(&mut t, point_idx);
+        start_triangle = insert_point_from(&mut t, point_idx, start_triangle);
     }
 
     remove_super_triangle(&mut t);
     t
 }
 
-pub fn find_containing_triangle(t: &Triangulation, point: &Point) -> PointLocation {
-    for (tri_idx, vertices) in t.triangle_vertices.iter().enumerate() {
-        let [v0, v1, v2] = *vertices;
-        let position = point_in_triangle(point, &t.points[v0], &t.points[v1], &t.points[v2]);
+/// Locate a point by walking from `start_triangle` through adjacent triangles.
+pub fn find_containing_triangle_from(
+    t: &Triangulation,
+    point: &Point,
+    start_triangle: usize,
+) -> PointLocation {
+    if t.triangle_vertices.is_empty() || start_triangle >= t.triangle_vertices.len() {
+        return PointLocation::NotFound;
+    }
+
+    // Walk through neighboring triangles instead of testing every triangle.
+    // The triangulation is connected, so a valid starting triangle reaches
+    // the containing triangle, or a boundary edge for an outside point.
+    let mut current = start_triangle;
+    let max_iterations = t.triangle_vertices.len() + 1;
+
+    for _ in 0..max_iterations {
+        let vertices = t.triangle_vertices[current];
+        let position = point_in_triangle(
+            point,
+            &t.points[vertices[0]],
+            &t.points[vertices[1]],
+            &t.points[vertices[2]],
+        );
 
         match position {
-            PointInTriangle::Inside => return PointLocation::Interior(tri_idx),
-            PointInTriangle::OnEdge0 => return PointLocation::OnEdge(tri_idx, 0),
-            PointInTriangle::OnEdge1 => return PointLocation::OnEdge(tri_idx, 1),
-            PointInTriangle::OnEdge2 => return PointLocation::OnEdge(tri_idx, 2),
-            PointInTriangle::Outside => continue,
+            PointInTriangle::Inside => return PointLocation::Interior(current),
+            PointInTriangle::OnEdge0 => return PointLocation::OnEdge(current, 0),
+            PointInTriangle::OnEdge1 => return PointLocation::OnEdge(current, 1),
+            PointInTriangle::OnEdge2 => return PointLocation::OnEdge(current, 2),
+            PointInTriangle::Outside => {}
         }
+
+        let mut next = None;
+        for opposite_vertex in 0..3 {
+            let edge_start = vertices[(opposite_vertex + 1) % 3];
+            let edge_end = vertices[(opposite_vertex + 2) % 3];
+            let edge_orientation = orient2d(&t.points[edge_start], &t.points[edge_end], point);
+
+            // Every triangle is stored CCW: initialization establishes that
+            // invariant and all split/flip paths use `ensure_ccw`. Its interior
+            // is therefore left of each directed edge, so a negative sign alone
+            // identifies an exit edge; no triangle-orientation predicate is needed.
+            if edge_orientation < 0.0 {
+                let neighbor = t.triangle_neighbors[current]
+                    .iter()
+                    .copied()
+                    .filter(|&neighbor| neighbor != NO_NEIGHBOR)
+                    .find(|&neighbor| {
+                        let neighbor_vertices = t.triangle_vertices[neighbor];
+                        neighbor_vertices.contains(&edge_start)
+                            && neighbor_vertices.contains(&edge_end)
+                    });
+                let Some(neighbor) = neighbor else {
+                    return PointLocation::NotFound;
+                };
+                next = Some(neighbor);
+                break;
+            }
+        }
+
+        let Some(next) = next else {
+            return PointLocation::NotFound;
+        };
+        current = next;
     }
 
     PointLocation::NotFound
@@ -300,23 +358,36 @@ fn insert_point_on_edge(t: &mut Triangulation, tri_idx: usize, edge_idx: usize, 
 /// Incrementally add new_points to an existing triangulation.
 /// Does NOT rebuild from scratch — inserts each new point incrementally.
 pub fn update_triangulation(t: &mut Triangulation, new_points: &[[f64; 2]]) {
+    let mut start_triangle = 0;
+
     for &point in new_points {
         t.points.push(point);
         let point_idx = t.points.len() - 1;
-        insert_point(t, point_idx);
+        start_triangle = insert_point_from(t, point_idx, start_triangle);
     }
 }
 
 pub fn insert_point(t: &mut Triangulation, point_idx: usize) {
+    insert_point_from(t, point_idx, 0);
+}
+
+fn insert_point_from(t: &mut Triangulation, point_idx: usize, start_triangle: usize) -> usize {
     let point = t.points[point_idx];
 
-    match find_containing_triangle(t, &point) {
-        PointLocation::Interior(tri_idx) => insert_point_interior(t, tri_idx, point_idx),
+    let containing_triangle = match find_containing_triangle_from(t, &point, start_triangle) {
+        PointLocation::Interior(tri_idx) => {
+            insert_point_interior(t, tri_idx, point_idx);
+            tri_idx
+        }
         PointLocation::OnEdge(tri_idx, edge_idx) => {
-            insert_point_on_edge(t, tri_idx, edge_idx, point_idx)
+            insert_point_on_edge(t, tri_idx, edge_idx, point_idx);
+            tri_idx
         }
         PointLocation::NotFound => panic!("point {} not found in any triangle", point_idx),
-    }
+    };
+
+    debug_assert!(t.triangle_vertices[containing_triangle].contains(&point_idx));
+    containing_triangle
 }
 
 pub fn build_polygons_from_edges(edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
@@ -636,6 +707,20 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn initial_super_triangle_is_counterclockwise() {
+        let triangulation = initialize_triangulation(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let [a, b, c] = triangulation.triangle_vertices[0];
+
+        assert!(
+            orient2d(
+                &triangulation.points[a],
+                &triangulation.points[b],
+                &triangulation.points[c]
+            ) > 0.0
+        );
+    }
+
     fn two_triangle_triangulation() -> Triangulation {
         Triangulation {
             points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
@@ -717,7 +802,7 @@ mod tests {
         let point = [0.75, 0.25];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::Interior(0)
         );
     }
@@ -728,8 +813,19 @@ mod tests {
         let point = [0.25, 0.75];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::Interior(1)
+        );
+    }
+
+    #[test]
+    fn finds_point_from_nonzero_start_triangle() {
+        let triangulation = two_triangle_triangulation();
+        let point = [0.75, 0.25];
+
+        assert_eq!(
+            find_containing_triangle_from(&triangulation, &point, 1),
+            PointLocation::Interior(0)
         );
     }
 
@@ -739,7 +835,7 @@ mod tests {
         let point = [0.5, 0.5];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::OnEdge(0, 2)
         );
     }
@@ -750,9 +846,35 @@ mod tests {
         let point = [1.5, 0.5];
 
         assert_eq!(
-            find_containing_triangle(&triangulation, &point),
+            find_containing_triangle_from(&triangulation, &point, 0),
             PointLocation::NotFound
         );
+    }
+
+    #[test]
+    fn sequential_insertions_reuse_valid_triangle_hint() {
+        let points = [
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [3.0, 3.0],
+            [0.0, 3.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [1.5, 2.0],
+        ];
+        let mut triangulation = initialize_triangulation(&points);
+        let mut start_triangle = 0;
+
+        for point in points {
+            triangulation.points.push(point);
+            let point_idx = triangulation.points.len() - 1;
+            start_triangle = insert_point_from(&mut triangulation, point_idx, start_triangle);
+
+            assert!(triangulation.triangle_vertices[start_triangle].contains(&point_idx));
+        }
+
+        assert_neighbors_consistent(&triangulation);
+        assert_delaunay(&triangulation);
     }
 
     #[test]
