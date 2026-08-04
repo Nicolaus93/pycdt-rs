@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::geometry::{incircle, orient2d};
+use crate::geometry::{incircle, orient2d, point_in_triangle, PointInTriangle};
 use crate::topology::{find_shared_edge, swap_diagonal};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, NO_NEIGHBOR};
@@ -107,9 +107,6 @@ pub fn find_intersecting_edges(
         }
     }
 
-    use crate::geometry::point_in_triangle;
-    use crate::geometry::PointInTriangle;
-
     // Start in the incident triangle entered by the segment. The first
     // triangle found in storage is not necessarily on the v1-to-v2 ray.
     let direction = [q[0] - p[0], q[1] - p[1]];
@@ -146,8 +143,6 @@ pub fn find_intersecting_edges(
         let pa = &t.points[verts[0]];
         let pb = &t.points[verts[1]];
         let pc = &t.points[verts[2]];
-        use crate::geometry::point_in_triangle;
-        use crate::geometry::PointInTriangle;
         let loc = point_in_triangle(&q, pa, pb, pc);
         if loc != PointInTriangle::Outside {
             break;
@@ -317,8 +312,6 @@ fn find_triangle_after_vertex(
     q: &Point,
     visited: &std::collections::HashSet<usize>,
 ) -> Option<usize> {
-    use crate::geometry::{point_in_triangle, PointInTriangle};
-
     let vertex_point = t.points[vertex];
     // Move only far enough to disambiguate which wedge of the triangle fan
     // contains the outgoing segment.
