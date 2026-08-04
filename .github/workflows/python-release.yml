@@ -1,0 +1,110 @@
+name: Python release
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: read
+
+# The published version comes directly from python/pyproject.toml. Update it in
+# the PR with `uv version --project python <version>` before merging.
+jobs:
+  wheels:
+    if: github.event.pull_request.merged == true
+    name: Build wheel (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2_17"
+          - os: windows-latest
+            target: x64
+            manylinux: ""
+          - os: macos-15-intel
+            target: x86_64
+            manylinux: ""
+          - os: macos-15
+            target: aarch64
+            manylinux: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          command: build
+          args: >-
+            --release
+            --out dist
+            --find-interpreter
+            --manifest-path python/Cargo.toml
+            --compatibility pypi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.target }}-${{ matrix.os }}
+          path: dist
+          if-no-files-found: error
+
+  sdist:
+    if: github.event.pull_request.merged == true
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.12.1"
+
+      - name: Build source distribution
+        run: uv build --sdist --out-dir dist --no-sources python
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: source-distribution
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    if: github.event.pull_request.merged == true
+    name: Publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pycdt-rs/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: "*"
+          path: dist
+          merge-multiple: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.12.1"
+
+      - name: Generate publish attestations
+        run: >-
+          uvx --from pypi-attestations==0.0.29
+          pypi-attestations sign dist/*.whl dist/*.tar.gz
+
+      - name: Publish distributions
+        run: uv publish --trusted-publishing always dist/*
