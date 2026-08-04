@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::geometry::{incircle, orient2d};
+use crate::geometry::{incircle, orient2d, point_in_triangle, PointInTriangle};
 use crate::topology::{find_shared_edge, swap_diagonal};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, NO_NEIGHBOR};
@@ -107,9 +107,6 @@ pub fn find_intersecting_edges(
         }
     }
 
-    use crate::geometry::point_in_triangle;
-    use crate::geometry::PointInTriangle;
-
     // Start in the incident triangle entered by the segment. The first
     // triangle found in storage is not necessarily on the v1-to-v2 ray.
     let direction = [q[0] - p[0], q[1] - p[1]];
@@ -146,8 +143,6 @@ pub fn find_intersecting_edges(
         let pa = &t.points[verts[0]];
         let pb = &t.points[verts[1]];
         let pc = &t.points[verts[2]];
-        use crate::geometry::point_in_triangle;
-        use crate::geometry::PointInTriangle;
         let loc = point_in_triangle(&q, pa, pb, pc);
         if loc != PointInTriangle::Outside {
             break;
@@ -247,7 +242,11 @@ fn check_proper_crossing(
     None
 }
 
-/// Case A: both edge endpoints are collinear with pq → walk across without recording
+/// Case A: both edge endpoints are collinear with `pq`.
+///
+/// An overlapping triangulation edge is not a proper intersection, so it is
+/// not added to the result. Instead, continue from the endpoint farther along
+/// `p -> q` and select the triangle entered after that vertex.
 fn check_collinear_overlap(
     t: &Triangulation,
     current_tri: usize,
@@ -262,10 +261,10 @@ fn check_collinear_overlap(
         &t.points[tri_verts[2]],
     ];
 
-    // edges: (local_start, local_end, opposite_local)
-    let edges = [(0usize, 1usize, 2usize), (1, 2, 0), (2, 0, 1)];
+    // edges: (local_start, local_end)
+    let edges = [(0usize, 1usize), (1, 2), (2, 0)];
 
-    for (ls, le, opp_local) in edges {
+    for (ls, le) in edges {
         let pqs = orient2d(p, q, pts[ls]);
         let pqe = orient2d(p, q, pts[le]);
 
@@ -277,29 +276,97 @@ fn check_collinear_overlap(
         if !collinear_overlap(p, q, pts[ls], pts[le]) {
             continue;
         }
-
-        // Find an unvisited neighbor sharing this edge
-        let neighbor = t.triangle_neighbors[current_tri][opp_local];
-        if neighbor != NO_NEIGHBOR && !visited.contains(&neighbor) {
-            return Some(neighbor);
-        }
-        // Also check other neighbors that share a vertex
-        for i in 0..3 {
-            let nb = t.triangle_neighbors[current_tri][i];
-            if nb == NO_NEIGHBOR || visited.contains(&nb) {
-                continue;
-            }
-            let nb_verts = t.triangle_vertices[nb];
-            if nb_verts.contains(&tri_verts[ls]) || nb_verts.contains(&tri_verts[le]) {
-                return Some(nb);
-            }
+        // The segment may follow this edge into a vertex shared by many
+        // triangles. Select the endpoint farther from p so the walk cannot
+        // turn backward along the overlapping edge.
+        let start_distance = (pts[ls][0] - p[0]).powi(2) + (pts[ls][1] - p[1]).powi(2);
+        let end_distance = (pts[le][0] - p[0]).powi(2) + (pts[le][1] - p[1]).powi(2);
+        let forward_vertex = if start_distance > end_distance {
+            tri_verts[ls]
+        } else {
+            tri_verts[le]
+        };
+        if let Some(next) = find_triangle_after_vertex(t, current_tri, forward_vertex, q, visited) {
+            return Some(next);
         }
     }
 
     None
 }
 
-/// Case B: exactly one endpoint collinear with pq → walk to adjacent triangle through that vertex
+/// Find the triangle entered immediately after `vertex` on the ray toward `q`.
+///
+/// When a constraint passes exactly through an existing vertex, a normal edge
+/// crossing does not identify one unique neighbor: several triangles form a
+/// fan around the vertex. Choosing the first unvisited neighbor can enter the
+/// wrong side of that fan and make the segment walk stall.
+///
+/// This function probes a point just beyond `vertex` toward `q`, then performs
+/// a local breadth-first walk through triangles incident to `vertex`. The
+/// incident triangle containing the probe is the geometrically correct next
+/// triangle. Triangles already visited by the outer segment walk are excluded.
+fn find_triangle_after_vertex(
+    t: &Triangulation,
+    current_tri: usize,
+    vertex: usize,
+    q: &Point,
+    visited: &std::collections::HashSet<usize>,
+) -> Option<usize> {
+    let vertex_point = t.points[vertex];
+    // Move only far enough to disambiguate which wedge of the triangle fan
+    // contains the outgoing segment.
+    let probe = [
+        vertex_point[0] + (q[0] - vertex_point[0]) * 1.0e-8,
+        vertex_point[1] + (q[1] - vertex_point[1]) * 1.0e-8,
+    ];
+    let mut queue: VecDeque<usize> = t.triangle_neighbors[current_tri]
+        .iter()
+        .copied()
+        .filter(|&neighbor| neighbor != NO_NEIGHBOR)
+        .collect();
+    let mut fan_visited = std::collections::HashSet::from([current_tri]);
+
+    while let Some(triangle) = queue.pop_front() {
+        // `visited` belongs to the complete segment walk; `fan_visited` keeps
+        // this local breadth-first search from cycling around the vertex.
+        if visited.contains(&triangle) || !fan_visited.insert(triangle) {
+            continue;
+        }
+
+        let vertices = t.triangle_vertices[triangle];
+        // Restrict the BFS to the star/fan of the collinear vertex.
+        if !vertices.contains(&vertex) {
+            continue;
+        }
+
+        if point_in_triangle(
+            &probe,
+            &t.points[vertices[0]],
+            &t.points[vertices[1]],
+            &t.points[vertices[2]],
+        ) != PointInTriangle::Outside
+        {
+            return Some(triangle);
+        }
+
+        // The probe is not in this wedge, so inspect adjacent wedges around
+        // the same vertex.
+        queue.extend(
+            t.triangle_neighbors[triangle]
+                .iter()
+                .copied()
+                .filter(|&neighbor| neighbor != NO_NEIGHBOR),
+        );
+    }
+
+    None
+}
+
+/// Case B: exactly one edge endpoint is collinear with `pq`.
+///
+/// The segment passes through that endpoint, so continue through the local
+/// triangle fan in the direction of `q` rather than choosing an arbitrary
+/// neighbor incident to the vertex.
 fn check_one_endpoint_collinear(
     t: &Triangulation,
     current_tri: usize,
@@ -336,15 +403,10 @@ fn check_one_endpoint_collinear(
             continue;
         }
 
-        // Walk into an unvisited neighbor containing this vertex
-        for i in 0..3 {
-            let nb = t.triangle_neighbors[current_tri][i];
-            if nb == NO_NEIGHBOR || visited.contains(&nb) {
-                continue;
-            }
-            if t.triangle_vertices[nb].contains(&collinear_v) {
-                return Some(nb);
-            }
+        // At a vertex, several triangles may meet the segment. Walk only
+        // through the local fan and select the triangle entered toward q.
+        if let Some(next) = find_triangle_after_vertex(t, current_tri, collinear_v, q, visited) {
+            return Some(next);
         }
     }
 
