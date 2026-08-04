@@ -62,7 +62,7 @@ full all-target suite is run for every series commit.
 Properly intersecting and partially overlapping constraints remain unsupported
 and are rejected. Symbolic perturbation and general predicate caching remain
 deferred; their required data model, API, constructions, and tests are described
-in `constrained-triangulation-future-work.md`.
+in the [README Limitations section](../README.md#limitations).
 
 ## Commit series
 
