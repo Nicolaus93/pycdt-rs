@@ -44,7 +44,7 @@ the same machine.
 | Revision | Elapsed | Relative |
 |---|---:|---:|
 | `3f7b383` (before) | 192.372 ms | 1.00× |
-| `b576be1` (optimized code) | 86.283 ms | 2.23× faster |
+| `d59024e` (optimized code) | 86.283 ms | 2.23× faster |
 
 Attempted 60×60 long/multiple-constraint variants were not reportable as a
 before/after comparison because the pre-optimization inserter returned failure
@@ -66,16 +66,16 @@ in `constrained-triangulation-future-work.md`.
 
 ## Commit series
 
-- `2a6b7f7` document cdt optimization plan
-- `211a050` use triangle-local edge handles
-- `97ba101` update constraint flip queues incrementally
-- `4a9a3b8` restore delaunay edges from local handles
-- `3196d47` remove global scans from constraint walks
-- `20025e6` streamline constraint segment walks
-- `fbc9326` classify flipped edges with one orientation
-- `1b8d153` reuse constraint insertion work buffers
-- `f0f3bc1` reject unsupported constraint intersections safely
-- `b576be1` document advanced constrained triangulation features
+- `3242e06` document cdt optimization plan
+- `0d7edd0` use triangle-local edge handles
+- `0969f54` update constraint flip queues incrementally
+- `11c2410` restore delaunay edges from local handles
+- `7ccc97b` remove global scans from constraint walks
+- `ed5cb51` streamline constraint segment walks
+- `4a9247f` classify flipped edges with one orientation
+- `05a2973` reuse constraint insertion work buffers
+- `37a76a5` reject unsupported constraint intersections safely
+- `d59024e` document advanced constrained triangulation features
 
 The hash of this summary commit is intentionally not self-referential; it is
 available from the branch log as `summarize cdt constraint insertion optimizations`.
