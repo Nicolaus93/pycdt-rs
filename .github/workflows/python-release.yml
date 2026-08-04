@@ -13,21 +13,25 @@ permissions:
 jobs:
   wheels:
     if: github.event.pull_request.merged == true
-    name: Build wheel (${{ matrix.target }})
+    name: Build wheel ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
+            platform: Ubuntu (x86_64)
             target: x86_64
             manylinux: "2_17"
           - os: windows-latest
+            platform: Windows (x86_64)
             target: x64
             manylinux: ""
           - os: macos-15-intel
+            platform: macOS (x86_64)
             target: x86_64
             manylinux: ""
           - os: macos-15
+            platform: macOS (aarch64)
             target: aarch64
             manylinux: ""
     runs-on: ${{ matrix.os }}
