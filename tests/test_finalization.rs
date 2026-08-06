@@ -1,6 +1,7 @@
 use pycdt_rs::build::{find_containing_triangle_from, triangulate};
 use pycdt_rs::types::{PointLocation, NO_NEIGHBOR};
 use pycdt_rs::Triangulation;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 fn assert_neighbors_consistent(t: &Triangulation) {
     let n = t.num_triangles();
@@ -169,16 +170,9 @@ fn test_triangulation_preserves_structure() {
 
 #[test]
 fn test_uniform_10k_preserves_convex_hull_triangle_count() {
-    let mut state = 0x1234_5678_u32;
-    let mut random = || {
-        state = state.wrapping_add(0x6D2B_79F5);
-        let mut value = state;
-        value = (value ^ (value >> 15)).wrapping_mul(value | 1);
-        value ^= value.wrapping_add((value ^ (value >> 7)).wrapping_mul(value | 61));
-        ((value ^ (value >> 14)) as f64) / 4_294_967_296.0
-    };
+    let mut rng = StdRng::seed_from_u64(0x1234_5678);
     let points: Vec<[f64; 2]> = (0..10_000)
-        .map(|_| [random() * 1000.0, random() * 1000.0])
+        .map(|_| [rng.gen::<f64>() * 1000.0, rng.gen::<f64>() * 1000.0])
         .collect();
 
     let triangulation = triangulate(&points);
@@ -189,9 +183,9 @@ fn test_uniform_10k_preserves_convex_hull_triangle_count() {
         .filter(|&&neighbor| neighbor == NO_NEIGHBOR)
         .count();
 
-    // This deterministic set has 32 convex-hull vertices, so Euler gives
-    // 2n - 2 - h = 19,966 triangles. A nearby finite super triangle used to
-    // leave four hull triangles attached to its vertices and remove them.
-    assert_eq!(boundary_edges, 32);
-    assert_eq!(triangulation.num_triangles(), 19_966);
+    // This deterministic set has 29 convex-hull vertices, so Euler gives
+    // 2n - 2 - h = 19,969 triangles. A nearby finite super triangle used to
+    // leave eight hull triangles attached to its vertices and remove them.
+    assert_eq!(boundary_edges, 29);
+    assert_eq!(triangulation.num_triangles(), 19_969);
 }
