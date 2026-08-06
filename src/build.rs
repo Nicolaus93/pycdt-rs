@@ -6,6 +6,8 @@ use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
 use std::collections::{HashMap, HashSet};
 
+const SUPER_TRIANGLE_SCALE: f64 = 10_000.0;
+
 fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
     assert!(
         !points.is_empty(),
@@ -30,9 +32,13 @@ fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
     let mid_x = (min_x + max_x) / 2.0;
     let mid_y = (min_y + max_y) / 2.0;
 
-    let p0 = [mid_x - 100.0 * delta_max, mid_y - delta_max];
-    let p1 = [mid_x, mid_y + 100.0 * delta_max];
-    let p2 = [mid_x + 100.0 * delta_max, mid_y - delta_max];
+    // Keep the artificial vertices far enough away that they behave like
+    // points at infinity. If they are too close, their Delaunay faces can cut
+    // across the real convex hull; removing those faces then leaves a concave
+    // outer boundary and too few triangles.
+    let p0 = [mid_x - SUPER_TRIANGLE_SCALE * delta_max, mid_y - delta_max];
+    let p1 = [mid_x, mid_y + SUPER_TRIANGLE_SCALE * delta_max];
+    let p2 = [mid_x + SUPER_TRIANGLE_SCALE * delta_max, mid_y - delta_max];
 
     Triangulation {
         points: vec![p0, p1, p2],
