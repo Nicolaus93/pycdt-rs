@@ -1,7 +1,7 @@
 use crate::geometry::{
     ensure_ccw, is_point_inside_polygon, orient2d, point_in_triangle, PointInTriangle,
 };
-use crate::topology::{lawson_swapping, reorder_neighbors};
+use crate::topology::{lawson_swapping_from_triangles, reorder_neighbors};
 use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
 use std::collections::{HashMap, HashSet};
@@ -105,12 +105,14 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
 
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
+    let mut legalization_stack = Vec::new();
     let mut start_triangle = 0;
 
     for &point in input_points {
         t.points.push(point);
         let point_idx = t.points.len() - 1;
-        start_triangle = insert_point_from(&mut t, point_idx, start_triangle);
+        start_triangle =
+            insert_point_from(&mut t, point_idx, start_triangle, &mut legalization_stack);
     }
 
     remove_super_triangle(&mut t);
@@ -212,7 +214,12 @@ fn update_external_neighbor(
     reorder_neighbors(t, neighbor_idx, old_idx, new_idx);
 }
 
-fn insert_point_interior(t: &mut Triangulation, tri_idx: usize, point_idx: usize) {
+fn insert_point_interior(
+    t: &mut Triangulation,
+    tri_idx: usize,
+    point_idx: usize,
+    legalization_stack: &mut Vec<(usize, usize)>,
+) {
     let [v0, v1, v2] = t.triangle_vertices[tri_idx];
     let [n0, n1, n2] = t.triangle_neighbors[tri_idx];
 
@@ -248,17 +255,20 @@ fn insert_point_interior(t: &mut Triangulation, tri_idx: usize, point_idx: usize
         tri_c_vertices,
         [n1, tri_idx, tri_b],
     ));
-
     update_external_neighbor(t, n0, tri_idx, tri_b);
     update_external_neighbor(t, n1, tri_idx, tri_c);
     update_external_neighbor(t, n2, tri_idx, tri_idx);
 
-    lawson_swapping(t, tri_idx, point_idx);
-    lawson_swapping(t, tri_b, point_idx);
-    lawson_swapping(t, tri_c, point_idx);
+    lawson_swapping_from_triangles(t, &[tri_idx, tri_b, tri_c], point_idx, legalization_stack);
 }
 
-fn insert_point_on_edge(t: &mut Triangulation, tri_idx: usize, edge_idx: usize, point_idx: usize) {
+fn insert_point_on_edge(
+    t: &mut Triangulation,
+    tri_idx: usize,
+    edge_idx: usize,
+    point_idx: usize,
+    legalization_stack: &mut Vec<(usize, usize)>,
+) {
     let containing_vertices = t.triangle_vertices[tri_idx];
     let containing_neighbors = t.triangle_neighbors[tri_idx];
 
@@ -349,38 +359,47 @@ fn insert_point_on_edge(t: &mut Triangulation, tri_idx: usize, edge_idx: usize, 
     update_external_neighbor(t, tz, adjacent_tri, adjacent_tri);
     update_external_neighbor(t, tw, adjacent_tri, tri_d);
 
-    lawson_swapping(t, tri_idx, point_idx);
-    lawson_swapping(t, tri_b, point_idx);
-    lawson_swapping(t, adjacent_tri, point_idx);
-    lawson_swapping(t, tri_d, point_idx);
+    lawson_swapping_from_triangles(
+        t,
+        &[tri_idx, tri_b, adjacent_tri, tri_d],
+        point_idx,
+        legalization_stack,
+    );
 }
 
 /// Incrementally add new_points to an existing triangulation.
 /// Does NOT rebuild from scratch — inserts each new point incrementally.
 pub fn update_triangulation(t: &mut Triangulation, new_points: &[[f64; 2]]) {
+    let mut legalization_stack = Vec::new();
     let mut start_triangle = 0;
 
     for &point in new_points {
         t.points.push(point);
         let point_idx = t.points.len() - 1;
-        start_triangle = insert_point_from(t, point_idx, start_triangle);
+        start_triangle = insert_point_from(t, point_idx, start_triangle, &mut legalization_stack);
     }
 }
 
 pub fn insert_point(t: &mut Triangulation, point_idx: usize) {
-    insert_point_from(t, point_idx, 0);
+    let mut legalization_stack = Vec::new();
+    insert_point_from(t, point_idx, 0, &mut legalization_stack);
 }
 
-fn insert_point_from(t: &mut Triangulation, point_idx: usize, start_triangle: usize) -> usize {
+fn insert_point_from(
+    t: &mut Triangulation,
+    point_idx: usize,
+    start_triangle: usize,
+    legalization_stack: &mut Vec<(usize, usize)>,
+) -> usize {
     let point = t.points[point_idx];
 
     let containing_triangle = match find_containing_triangle_from(t, &point, start_triangle) {
         PointLocation::Interior(tri_idx) => {
-            insert_point_interior(t, tri_idx, point_idx);
+            insert_point_interior(t, tri_idx, point_idx, legalization_stack);
             tri_idx
         }
         PointLocation::OnEdge(tri_idx, edge_idx) => {
-            insert_point_on_edge(t, tri_idx, edge_idx, point_idx);
+            insert_point_on_edge(t, tri_idx, edge_idx, point_idx, legalization_stack);
             tri_idx
         }
         PointLocation::NotFound => panic!("point {} not found in any triangle", point_idx),
@@ -864,11 +883,17 @@ mod tests {
         ];
         let mut triangulation = initialize_triangulation(&points);
         let mut start_triangle = 0;
+        let mut legalization_stack = Vec::new();
 
         for point in points {
             triangulation.points.push(point);
             let point_idx = triangulation.points.len() - 1;
-            start_triangle = insert_point_from(&mut triangulation, point_idx, start_triangle);
+            start_triangle = insert_point_from(
+                &mut triangulation,
+                point_idx,
+                start_triangle,
+                &mut legalization_stack,
+            );
 
             assert!(triangulation.triangle_vertices[start_triangle].contains(&point_idx));
         }
@@ -881,7 +906,8 @@ mod tests {
     fn insert_point_interior_splits_one_triangle_into_three() {
         let mut triangulation = single_triangle_triangulation();
 
-        insert_point_interior(&mut triangulation, 0, 3);
+        let mut legalization_stack = Vec::new();
+        insert_point_interior(&mut triangulation, 0, 3, &mut legalization_stack);
 
         assert_eq!(triangulation.num_triangles(), 3);
         assert_neighbors_consistent(&triangulation);
@@ -891,7 +917,8 @@ mod tests {
     fn insert_point_on_edge_splits_two_triangles_into_four() {
         let mut triangulation = edge_split_triangulation();
 
-        insert_point_on_edge(&mut triangulation, 0, 1, 4);
+        let mut legalization_stack = Vec::new();
+        insert_point_on_edge(&mut triangulation, 0, 1, 4, &mut legalization_stack);
 
         assert_eq!(triangulation.num_triangles(), 4);
         assert_neighbors_consistent(&triangulation);
