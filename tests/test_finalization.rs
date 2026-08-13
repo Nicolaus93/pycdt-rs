@@ -189,3 +189,29 @@ fn test_uniform_10k_preserves_convex_hull_triangle_count() {
     assert_eq!(boundary_edges, 29);
     assert_eq!(triangulation.num_triangles(), 19_969);
 }
+
+#[test]
+fn test_u32_halfedges_are_exact_twins() {
+    let points = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [1.0, 1.0]];
+    let triangulation = triangulate(&points);
+
+    assert_eq!(
+        triangulation.triangle_halfedges.len(),
+        triangulation.num_triangles()
+    );
+    for (tri_idx, halfedges) in triangulation.triangle_halfedges.iter().enumerate() {
+        for (opposite, &twin) in halfedges.iter().enumerate() {
+            let neighbor = triangulation.triangle_neighbors[tri_idx][opposite];
+            if neighbor == NO_NEIGHBOR {
+                assert_eq!(twin, u32::MAX);
+                continue;
+            }
+            assert_eq!(twin as usize / 3, neighbor);
+            let twin_opposite = twin as usize % 3;
+            assert_eq!(
+                triangulation.triangle_halfedges[neighbor][twin_opposite] as usize,
+                tri_idx * 3 + opposite
+            );
+        }
+    }
+}

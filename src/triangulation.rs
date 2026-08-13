@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::{Point, TriangleNeighbors, TriangleVertices, NO_NEIGHBOR};
+const NO_HALFEDGE: u32 = u32::MAX;
 
 /// A triangulation whose triangle vertex triples use counterclockwise winding.
 ///
@@ -11,6 +12,9 @@ pub struct Triangulation {
     pub points: Vec<Point>,
     pub triangle_vertices: Vec<TriangleVertices>,
     pub triangle_neighbors: Vec<TriangleNeighbors>,
+    /// Exact twin half-edge IDs (`triangle * 3 + opposite_vertex_slot`).
+    /// Kept alongside triangle-level neighbors for API compatibility.
+    pub triangle_halfedges: Vec<[u32; 3]>,
     pub constrained_edges: HashSet<(usize, usize)>,
     pub num_super_triangle_points: usize,
 }
@@ -18,6 +22,7 @@ pub struct Triangulation {
 impl Triangulation {
     pub fn new() -> Self {
         Self {
+            triangle_halfedges: Vec::new(),
             points: Vec::new(),
             triangle_vertices: Vec::new(),
             triangle_neighbors: Vec::new(),
@@ -66,6 +71,49 @@ impl Triangulation {
         }
 
         None
+    }
+
+    pub(crate) fn refresh_halfedges(&mut self, triangles: &[usize]) {
+        self.triangle_halfedges
+            .resize(self.triangle_vertices.len(), [NO_HALFEDGE; 3]);
+        for &tri_idx in triangles {
+            if tri_idx >= self.triangle_vertices.len() {
+                continue;
+            }
+            let vertices = self.triangle_vertices[tri_idx];
+            for opposite in 0..3 {
+                let neighbor = self.triangle_neighbors[tri_idx][opposite];
+                self.triangle_halfedges[tri_idx][opposite] = if neighbor == NO_NEIGHBOR {
+                    NO_HALFEDGE
+                } else {
+                    let edge_a = vertices[(opposite + 1) % 3];
+                    let edge_b = vertices[(opposite + 2) % 3];
+                    let neighbor_opposite = self.triangle_vertices[neighbor]
+                        .iter()
+                        .position(|&vertex| vertex != edge_a && vertex != edge_b)
+                        .expect("neighbor must share the opposite edge");
+                    u32::try_from(neighbor * 3 + neighbor_opposite)
+                        .expect("half-edge index exceeds u32 capacity")
+                };
+            }
+        }
+    }
+
+    pub(crate) fn rebuild_halfedges(&mut self) {
+        let triangles: Vec<usize> = (0..self.triangle_vertices.len()).collect();
+        self.refresh_halfedges(&triangles);
+    }
+
+    pub(crate) fn halfedge_neighbor(&self, tri_idx: usize, opposite: usize) -> usize {
+        let Some(halfedges) = self.triangle_halfedges.get(tri_idx) else {
+            return self.triangle_neighbors[tri_idx][opposite];
+        };
+        let halfedge = halfedges[opposite];
+        if halfedge == NO_HALFEDGE {
+            NO_NEIGHBOR
+        } else {
+            halfedge as usize / 3
+        }
     }
 
     pub fn edge_key(a: usize, b: usize) -> (usize, usize) {
