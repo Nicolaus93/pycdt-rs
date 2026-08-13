@@ -6,8 +6,10 @@ use crate::triangulation::Triangulation;
 use crate::types::{Point, PointLocation, NO_NEIGHBOR};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
 const SUPER_TRIANGLE_SCALE: f64 = 10_000.0;
 
+#[cfg(test)]
 fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
     assert!(
         !points.is_empty(),
@@ -114,55 +116,55 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
     t.num_super_triangle_points = 0;
 }
 
-fn spread_bits_16(mut value: u32) -> u32 {
-    value &= 0x0000_ffff;
-    value = (value | (value << 8)) & 0x00ff_00ff;
-    value = (value | (value << 4)) & 0x0f0f_0f0f;
-    value = (value | (value << 2)) & 0x3333_3333;
-    value = (value | (value << 1)) & 0x5555_5555;
-    value
-}
-
-fn morton_key(point: &Point, min: &Point, max: &Point) -> u32 {
-    let quantize = |value: f64, low: f64, high: f64| {
-        if high == low {
-            0
-        } else {
-            (((value - low) / (high - low)).clamp(0.0, 1.0) * 65_535.0) as u32
-        }
-    };
-    let x = quantize(point[0], min[0], max[0]);
-    let y = quantize(point[1], min[1], max[1]);
-    spread_bits_16(x) | (spread_bits_16(y) << 1)
-}
-
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
-    let mut t = initialize_triangulation(input_points);
-    t.rebuild_halfedges();
-    let mut legalization_stack = Vec::new();
-    let mut start_triangle = 0;
-    t.points.extend_from_slice(input_points);
+    assert!(
+        !input_points.is_empty(),
+        "triangulate requires at least one point"
+    );
 
-    let min = input_points.iter().fold([f64::INFINITY; 2], |min, point| {
-        [min[0].min(point[0]), min[1].min(point[1])]
-    });
-    let max = input_points
+    let sweep_points: Vec<delaunator::Point> = input_points
         .iter()
-        .fold([f64::NEG_INFINITY; 2], |max, point| {
-            [max[0].max(point[0]), max[1].max(point[1])]
-        });
-    let mut insertion_order: Vec<usize> = (3..t.points.len()).collect();
-    insertion_order.sort_unstable_by_key(|&point_idx| {
-        (morton_key(&t.points[point_idx], &min, &max), point_idx)
-    });
+        .map(|&[x, y]| delaunator::Point { x, y })
+        .collect();
+    let sweep = delaunator::triangulate(&sweep_points);
 
-    for point_idx in insertion_order {
-        start_triangle =
-            insert_point_from(&mut t, point_idx, start_triangle, &mut legalization_stack);
+    let triangle_vertices: Vec<[usize; 3]> = sweep
+        .triangles
+        .chunks_exact(3)
+        .map(|vertices| [vertices[0], vertices[2], vertices[1]])
+        .collect();
+    let mut triangle_neighbors = Vec::with_capacity(triangle_vertices.len());
+    let mut triangle_halfedges = Vec::with_capacity(triangle_vertices.len());
+    for tri_idx in 0..triangle_vertices.len() {
+        const DELAUNATOR_EDGE_FOR_OPPOSITE: [usize; 3] = [1, 0, 2];
+        let base = tri_idx * 3;
+        let mut neighbors = [NO_NEIGHBOR; 3];
+        let mut halfedges = [u32::MAX; 3];
+        for opposite in 0..3 {
+            // Delaunator output uses the opposite winding; this crate indexes an
+            // edge by its opposite vertex, so the slot mapping accounts for both.
+            let edge = base + DELAUNATOR_EDGE_FOR_OPPOSITE[opposite];
+            let twin = sweep.halfedges[edge];
+            if twin != delaunator::EMPTY {
+                let neighbor = twin / 3;
+                let neighbor_opposite = DELAUNATOR_EDGE_FOR_OPPOSITE[twin % 3];
+                neighbors[opposite] = neighbor;
+                halfedges[opposite] = u32::try_from(neighbor * 3 + neighbor_opposite)
+                    .expect("half-edge index exceeds u32 capacity");
+            }
+        }
+        triangle_neighbors.push(neighbors);
+        triangle_halfedges.push(halfedges);
     }
 
-    remove_super_triangle(&mut t);
-    t
+    Triangulation {
+        points: input_points.to_vec(),
+        triangle_vertices,
+        triangle_neighbors,
+        triangle_halfedges,
+        constrained_edges: Default::default(),
+        num_super_triangle_points: 0,
+    }
 }
 
 /// Locate a point by walking from `start_triangle` through adjacent triangles.

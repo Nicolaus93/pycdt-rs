@@ -12,6 +12,7 @@ name = "pycdt_rs"
 crate-type = ["rlib"]
 
 [dependencies]
+delaunator = "1.0.2"
 robust = "1"
 
 [dev-dependencies]
