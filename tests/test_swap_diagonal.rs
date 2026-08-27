@@ -169,6 +169,7 @@ fn test_swap_diagonal_explicit_two_triangle_setup() {
         triangle_vertices: vec![[0, 1, 2], [3, 2, 1]],
         triangle_neighbors: vec![[1, NO_NEIGHBOR, NO_NEIGHBOR], [0, NO_NEIGHBOR, NO_NEIGHBOR]],
         constrained_edges: Default::default(),
+        triangle_halfedges: Vec::new(),
         num_super_triangle_points: 0,
     };
 
@@ -228,6 +229,7 @@ fn test_swap_diagonal_with_outer_neighbors_updates_back_refs() {
             [NO_NEIGHBOR, NO_NEIGHBOR, 2],
         ],
         constrained_edges: Default::default(),
+        triangle_halfedges: Vec::new(),
         num_super_triangle_points: 0,
     };
 

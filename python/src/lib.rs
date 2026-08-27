@@ -99,6 +99,7 @@ impl PyTriangulation {
                     .unwrap()
             })
             .collect();
+        self.inner.triangle_halfedges.clear();
         Ok(())
     }
 }

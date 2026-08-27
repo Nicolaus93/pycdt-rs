@@ -56,6 +56,7 @@ fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
         triangle_vertices,
         triangle_neighbors,
         constrained_edges: Default::default(),
+        triangle_halfedges: Vec::new(),
         num_super_triangle_points: 3,
     }
 }
@@ -109,6 +110,7 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
     t.triangle_vertices = new_triangle_vertices;
     t.triangle_neighbors = new_triangle_neighbors;
     t.points.drain(0..num_super);
+    t.rebuild_halfedges();
     t.num_super_triangle_points = 0;
 }
 
@@ -136,6 +138,7 @@ fn morton_key(point: &Point, min: &Point, max: &Point) -> u32 {
 
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
+    t.rebuild_halfedges();
     let mut legalization_stack = Vec::new();
     let mut start_triangle = 0;
     t.points.extend_from_slice(input_points);
@@ -208,7 +211,7 @@ pub fn find_containing_triangle_from(
             if edge_orientation < 0.0 {
                 // Neighbor slot i is across the edge opposite vertices[i],
                 // exactly the exit edge selected by opposite_vertex.
-                let neighbor = t.triangle_neighbors[current][opposite_vertex];
+                let neighbor = t.halfedge_neighbor(current, opposite_vertex);
                 if neighbor == NO_NEIGHBOR {
                     return PointLocation::NotFound;
                 }
@@ -302,6 +305,7 @@ fn insert_point_interior(
     update_external_neighbor(t, n1, tri_idx, tri_c);
     update_external_neighbor(t, n2, tri_idx, tri_idx);
 
+    t.refresh_halfedges(&[tri_idx, tri_b, tri_c, n0, n1, n2]);
     lawson_swapping_from_triangles(t, &[tri_idx, tri_b, tri_c], point_idx, legalization_stack);
 }
 
@@ -402,6 +406,7 @@ fn insert_point_on_edge(
     update_external_neighbor(t, tz, adjacent_tri, adjacent_tri);
     update_external_neighbor(t, tw, adjacent_tri, tri_d);
 
+    t.refresh_halfedges(&[tri_idx, tri_b, adjacent_tri, tri_d, tx, ty, tz, tw]);
     lawson_swapping_from_triangles(
         t,
         &[tri_idx, tri_b, adjacent_tri, tri_d],
@@ -618,6 +623,7 @@ fn retain_triangles(t: &mut Triangulation, keep: &[usize]) {
     let new_triangle_neighbors = rebuild_triangle_neighbors(&new_triangle_vertices);
     t.triangle_vertices = new_triangle_vertices;
     t.triangle_neighbors = new_triangle_neighbors;
+    t.rebuild_halfedges();
 }
 
 fn remove_holes_by_edges_with_constraint_inserter<F>(
@@ -789,6 +795,7 @@ mod tests {
             triangle_vertices: vec![[0, 1, 2], [0, 2, 3]],
             triangle_neighbors: vec![[NO_NEIGHBOR, 1, NO_NEIGHBOR], [NO_NEIGHBOR, NO_NEIGHBOR, 0]],
             constrained_edges: Default::default(),
+            triangle_halfedges: Vec::new(),
             num_super_triangle_points: 0,
         }
     }
@@ -799,6 +806,7 @@ mod tests {
             triangle_vertices: vec![[0, 1, 2]],
             triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
             constrained_edges: Default::default(),
+            triangle_halfedges: Vec::new(),
             num_super_triangle_points: 0,
         }
     }
@@ -809,6 +817,7 @@ mod tests {
             triangle_vertices: vec![[0, 1, 2], [3, 2, 1]],
             triangle_neighbors: vec![[1, NO_NEIGHBOR, NO_NEIGHBOR], [0, NO_NEIGHBOR, NO_NEIGHBOR]],
             constrained_edges: Default::default(),
+            triangle_halfedges: Vec::new(),
             num_super_triangle_points: 0,
         }
     }

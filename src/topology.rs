@@ -166,6 +166,7 @@ pub fn swap_diagonal(t: &mut Triangulation, tri_a: usize, tri_b: usize) {
     if t7 != NO_NEIGHBOR {
         reorder_neighbors(t, t7, tri_b, tri_a);
     }
+    t.refresh_halfedges(&[tri_a, tri_b, t5, t6, t7, t8]);
 }
 
 /// Walk from start_tri using BFS to find the first triangle that contains `vertex`.
@@ -224,7 +225,7 @@ pub(crate) fn lawson_swapping_from_triangles(
     for &tri_idx in triangles {
         let point_pos = vertex_pos(t, tri_idx, point_idx)
             .expect("legalization seed must contain inserted point");
-        let neighbor = t.triangle_neighbors[tri_idx][point_pos];
+        let neighbor = t.halfedge_neighbor(tri_idx, point_pos);
         if neighbor != NO_NEIGHBOR {
             stack.push((neighbor, tri_idx));
         }
@@ -267,13 +268,13 @@ pub(crate) fn lawson_swapping_from_triangles(
         // After flip, point_idx is in both t4_idx and t3_idx.
         // Push the new potentially-illegal edges (neighbors opposite point_idx in each).
         if let Some(pos) = vertex_pos(t, t4_idx, point_idx) {
-            let new_t7 = t.triangle_neighbors[t4_idx][pos];
+            let new_t7 = t.halfedge_neighbor(t4_idx, pos);
             if new_t7 != NO_NEIGHBOR {
                 stack.push((new_t7, t4_idx));
             }
         }
         if let Some(pos) = vertex_pos(t, t3_idx, point_idx) {
-            let new_t8 = t.triangle_neighbors[t3_idx][pos];
+            let new_t8 = t.halfedge_neighbor(t3_idx, pos);
             if new_t8 != NO_NEIGHBOR {
                 stack.push((new_t8, t3_idx));
             }
