@@ -40,12 +40,21 @@ fn initialize_triangulation(points: &[[f64; 2]]) -> Triangulation {
     let p1 = [mid_x, mid_y + SUPER_TRIANGLE_SCALE * delta_max];
     let p2 = [mid_x + SUPER_TRIANGLE_SCALE * delta_max, mid_y - delta_max];
 
+    let point_capacity = points.len().saturating_add(3);
+    let triangle_capacity = points.len().saturating_mul(2).saturating_add(1);
+    let mut stored_points = Vec::with_capacity(point_capacity);
+    stored_points.extend([p0, p1, p2]);
+    let mut triangle_vertices = Vec::with_capacity(triangle_capacity);
+    triangle_vertices.push([0, 2, 1]);
+    let mut triangle_neighbors = Vec::with_capacity(triangle_capacity);
+    triangle_neighbors.push([NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]);
+
     Triangulation {
-        points: vec![p0, p1, p2],
+        points: stored_points,
         // Triangle-producing operations preserve CCW winding, so establish
         // that invariant before the first point-location walk.
-        triangle_vertices: vec![[0, 2, 1]],
-        triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, NO_NEIGHBOR]],
+        triangle_vertices,
+        triangle_neighbors,
         constrained_edges: Default::default(),
         num_super_triangle_points: 3,
     }
