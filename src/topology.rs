@@ -207,11 +207,24 @@ pub fn find_triangle_with_vertex(t: &Triangulation, start_tri: usize, vertex: us
 ///
 /// Mirrors Python topology.py lawson_swapping but uses an explicit Vec stack.
 pub fn lawson_swapping(t: &mut Triangulation, tri_idx: usize, point_idx: usize) {
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut stack = Vec::new();
+    lawson_swapping_from_triangles(t, &[tri_idx], point_idx, &mut stack);
+}
 
-    // Seed the stack with all valid neighbors of the newly inserted triangle
-    for i in 0..3 {
-        let neighbor = t.triangle_neighbors[tri_idx][i];
+pub(crate) fn lawson_swapping_from_triangles(
+    t: &mut Triangulation,
+    triangles: &[usize],
+    point_idx: usize,
+    stack: &mut Vec<(usize, usize)>,
+) {
+    stack.clear();
+
+    // Only seed boundary edges of the insertion cavity; sibling triangles all
+    // contain point_idx and can never need legalization against one another.
+    for &tri_idx in triangles {
+        let point_pos = vertex_pos(t, tri_idx, point_idx)
+            .expect("legalization seed must contain inserted point");
+        let neighbor = t.triangle_neighbors[tri_idx][point_pos];
         if neighbor != NO_NEIGHBOR {
             stack.push((neighbor, tri_idx));
         }
