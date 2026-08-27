@@ -1,9 +1,246 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::geometry::{incircle, orient2d, point_in_triangle, PointInTriangle};
-use crate::topology::{find_shared_edge, swap_diagonal};
+use crate::geometry::{incircle, orient2d};
+#[cfg(test)]
+use crate::topology::find_shared_edge;
 use crate::triangulation::Triangulation;
 use crate::types::{Point, NO_NEIGHBOR};
+
+/// One current incident triangle for every vertex in a constraint batch.
+///
+/// Construction is one linear pass. Flips keep triangle indices stable, so
+/// refreshing a rewritten pair preserves O(1) walk starts.
+struct IncidentMap {
+    triangles: Vec<usize>,
+}
+
+impl IncidentMap {
+    /// Builds the batch incidence map with one scan of triangle storage.
+    fn new(t: &Triangulation) -> Self {
+        let mut triangles = vec![NO_NEIGHBOR; t.points.len()];
+        for (triangle, vertices) in t.triangle_vertices.iter().enumerate() {
+            for &vertex in vertices {
+                triangles[vertex] = triangle;
+            }
+        }
+        Self { triangles }
+    }
+
+    /// Refreshes incidence for the constant-size neighborhood of a flip.
+    fn refresh(&mut self, t: &Triangulation, changed: [usize; 2]) {
+        for triangle in changed {
+            for &vertex in &t.triangle_vertices[triangle] {
+                self.triangles[vertex] = triangle;
+            }
+        }
+    }
+}
+
+/// Reusable insertion/restoration buffers for one constraint batch.
+///
+/// Membership is live only when an edge's stored generation equals the current
+/// generation. Starting a phase therefore clears marks in O(1); on generation
+/// wrap the map is physically cleared before generation one is reused.
+struct ConstraintWorkspace {
+    incidence: IncidentMap,
+    queue: VecDeque<(usize, usize)>,
+    handles: HashMap<(usize, usize), LocalEdge>,
+    marks: HashMap<(usize, usize), u32>,
+    generation: u32,
+    sides: HashMap<usize, i8>,
+}
+impl ConstraintWorkspace {
+    /// Creates batch-lifetime storage and the persistent incidence map.
+    fn new(t: &Triangulation) -> Self {
+        Self {
+            incidence: IncidentMap::new(t),
+            queue: VecDeque::new(),
+            handles: HashMap::new(),
+            marks: HashMap::new(),
+            generation: 0,
+            sides: HashMap::new(),
+        }
+    }
+    /// Begins a phase while retaining buffer capacities.
+    fn begin_phase(&mut self) {
+        self.queue.clear();
+        self.handles.clear();
+        self.sides.clear();
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.clear();
+            self.generation = 1;
+        }
+    }
+    /// Gives a physical edge one live queue owner.
+    fn enqueue(&mut self, edge: (usize, usize)) {
+        if self.marks.get(&edge).copied() != Some(self.generation) {
+            self.marks.insert(edge, self.generation);
+            self.queue.push_back(edge);
+        }
+    }
+    /// Pops and releases one queue owner.
+    fn pop(&mut self) -> Option<(usize, usize)> {
+        let edge = self.queue.pop_front()?;
+        self.marks.insert(edge, 0);
+        Some(edge)
+    }
+}
+
+/// A directed view of one triangle edge, identified by its opposite vertex.
+///
+/// `local` is the local vertex index in `triangle`; consequently the edge is
+/// formed by the other two local vertices and its adjacent triangle is stored
+/// in `triangle_neighbors[triangle][local]`. This representation makes all
+/// topology access constant-time and avoids constructing temporary vertex
+/// sets when two adjacent triangles are inspected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalEdge {
+    triangle: usize,
+    local: usize,
+}
+
+impl LocalEdge {
+    /// Returns the edge endpoints in the triangle's cyclic (CCW) order.
+    fn vertices(self, t: &Triangulation) -> (usize, usize) {
+        let next = self.next();
+        (next.opposite(t), next.next().opposite(t))
+    }
+
+    /// Returns the vertex opposite the represented edge.
+    fn opposite(self, t: &Triangulation) -> usize {
+        t.triangle_vertices[self.triangle][self.local]
+    }
+
+    /// Returns the adjacent triangle, if this is not a hull edge.
+    fn neighbor(self, t: &Triangulation) -> Option<usize> {
+        let neighbor = t.triangle_neighbors[self.triangle][self.local];
+        (neighbor != NO_NEIGHBOR).then_some(neighbor)
+    }
+
+    /// Rotates the handle counter-clockwise to the next edge of its triangle.
+    fn next(self) -> Self {
+        Self {
+            triangle: self.triangle,
+            local: (self.local + 1) % 3,
+        }
+    }
+
+    /// Finds the reciprocal local handle in the adjacent triangle.
+    fn across(self, t: &Triangulation) -> Option<Self> {
+        let neighbor = self.neighbor(t)?;
+        let local = t.triangle_neighbors[neighbor]
+            .iter()
+            .position(|&candidate| candidate == self.triangle)?;
+        Some(Self {
+            triangle: neighbor,
+            local,
+        })
+    }
+}
+
+/// Result of flipping the edge designated by a [`LocalEdge`].
+#[derive(Clone, Copy, Debug)]
+struct FlipResult {
+    /// The new diagonal as owned by the first rewritten triangle.
+    diagonal: LocalEdge,
+    /// The same diagonal as owned by the second rewritten triangle.
+    diagonal_twin: LocalEdge,
+}
+
+/// Replaces a designated shared edge by the other diagonal of its quadrilateral.
+///
+/// Rotate the first triangle to `[c,u,v]` and its neighbor to `[d,v,u]`, where
+/// `u-v` is the designated edge. The result is `[c,d,v]` and `[c,u,d]`.
+/// Triangle indices are stable, and only the two outside neighbors whose owner
+/// changes need reciprocal-link repairs. Both returned handles designate the
+/// new `c-d` diagonal.
+fn flip_designated_edge(t: &mut Triangulation, edge: LocalEdge) -> Option<FlipResult> {
+    let twin = edge.across(t)?;
+    let a = edge.triangle;
+    let b = twin.triangle;
+    let av = t.triangle_vertices[a];
+    let an = t.triangle_neighbors[a];
+    let bv = t.triangle_vertices[b];
+    let bn = t.triangle_neighbors[b];
+    let ia = edge.local;
+    let ib = twin.local;
+
+    let c = av[ia];
+    let u = av[(ia + 1) % 3];
+    let v = av[(ia + 2) % 3];
+    let d = bv[ib];
+    // The adjacent CCW triangle sees the shared edge in reverse.
+    debug_assert_eq!(bv[(ib + 1) % 3], v);
+    debug_assert_eq!(bv[(ib + 2) % 3], u);
+
+    let a_across_u = an[(ia + 1) % 3]; // old edge v-c
+    let a_across_v = an[(ia + 2) % 3]; // old edge c-u
+    let b_across_v = bn[(ib + 1) % 3]; // old edge u-d
+    let b_across_u = bn[(ib + 2) % 3]; // old edge d-v
+
+    t.triangle_vertices[a] = [c, d, v];
+    t.triangle_neighbors[a] = [b_across_u, a_across_u, b];
+    t.triangle_vertices[b] = [c, u, d];
+    t.triangle_neighbors[b] = [b_across_v, a, a_across_v];
+
+    // These are the only boundary edges that changed triangle ownership.
+    replace_neighbor(t, b_across_u, b, a);
+    replace_neighbor(t, a_across_v, a, b);
+
+    Some(FlipResult {
+        diagonal: LocalEdge {
+            triangle: a,
+            local: 2,
+        },
+        diagonal_twin: LocalEdge {
+            triangle: b,
+            local: 1,
+        },
+    })
+}
+
+/// Updates one reciprocal neighbor reference, ignoring a hull sentinel.
+fn replace_neighbor(t: &mut Triangulation, triangle: usize, old: usize, new: usize) {
+    if triangle == NO_NEIGHBOR {
+        return;
+    }
+    let slot = t.triangle_neighbors[triangle]
+        .iter_mut()
+        .find(|neighbor| **neighbor == old)
+        .expect("topology invariant: outside neighbor must reference old owner");
+    *slot = new;
+}
+
+/// Resolves an adjacent triangle pair to the edge owned by `tri_a`.
+fn local_edge_between(t: &Triangulation, tri_a: usize, tri_b: usize) -> Option<LocalEdge> {
+    let local = t
+        .triangle_neighbors
+        .get(tri_a)?
+        .iter()
+        .position(|&n| n == tri_b)?;
+    Some(LocalEdge {
+        triangle: tri_a,
+        local,
+    })
+}
+
+/// Tests strict convexity using the four vertices around a local edge.
+fn local_quadrilateral_is_convex(t: &Triangulation, edge: LocalEdge) -> bool {
+    let Some(twin) = edge.across(t) else {
+        return false;
+    };
+    let (u, v) = edge.vertices(t);
+    let c = edge.opposite(t);
+    let d = twin.opposite(t);
+
+    orient2d(&t.points[u], &t.points[v], &t.points[c])
+        * orient2d(&t.points[u], &t.points[v], &t.points[d])
+        < 0.0
+        && orient2d(&t.points[c], &t.points[d], &t.points[u])
+            * orient2d(&t.points[c], &t.points[d], &t.points[v])
+            < 0.0
+}
 
 /// Test if segments (p1,p2) and (p3,p4) properly intersect (not touching at endpoints).
 /// Port from Python constrained.py:segments_intersect
@@ -33,46 +270,7 @@ pub fn segments_intersect(p1: &Point, p2: &Point, p3: &Point, p4: &Point) -> boo
 /// tri_a and tri_b must share exactly one edge.
 /// Port from Python constrained.py:is_quadrilateral_convex (4-vertex version).
 pub fn is_quadrilateral_convex(t: &Triangulation, tri_a: usize, tri_b: usize) -> bool {
-    let va = t.triangle_vertices[tri_a];
-    let vb = t.triangle_vertices[tri_b];
-
-    // Find shared edge
-    let shared: Vec<usize> = va.iter().copied().filter(|v| vb.contains(v)).collect();
-    if shared.len() != 2 {
-        return false;
-    }
-    let (vk, vl) = (shared[0], shared[1]);
-    let vm = va
-        .iter()
-        .copied()
-        .find(|&v| v != vk && v != vl)
-        .expect("invariant: triangle A must have one opposite vertex");
-    let vn = vb
-        .iter()
-        .copied()
-        .find(|&v| v != vk && v != vl)
-        .expect("invariant: triangle B must have one opposite vertex");
-
-    let pk = &t.points[vk];
-    let pl = &t.points[vl];
-    let pm = &t.points[vm];
-    let pn = &t.points[vn];
-
-    // vm and vn must be on opposite sides of edge vk-vl
-    let o_vm = orient2d(pk, pl, pm);
-    let o_vn = orient2d(pk, pl, pn);
-    if o_vm * o_vn >= 0.0 {
-        return false;
-    }
-
-    // vk and vl must be on opposite sides of edge vm-vn
-    let o_vk = orient2d(pm, pn, pk);
-    let o_vl = orient2d(pm, pn, pl);
-    if o_vk * o_vl >= 0.0 {
-        return false;
-    }
-
-    true
+    local_edge_between(t, tri_a, tri_b).is_some_and(|edge| local_quadrilateral_is_convex(t, edge))
 }
 
 /// Walk the triangulation from v1 toward v2, collecting all triangle edges that
@@ -82,343 +280,143 @@ pub fn find_intersecting_edges(
     v1: usize,
     v2: usize,
 ) -> Option<Vec<(usize, usize)>> {
-    let p = t.points[v1];
-    let q = t.points[v2];
+    find_intersecting_edges_from(t, v1, v2, &IncidentMap::new(t))
+}
 
-    // Find all triangles containing v1
-    let tris_with_v1: Vec<usize> = t
-        .triangle_vertices
-        .iter()
-        .enumerate()
-        .filter_map(|(i, verts)| if verts.contains(&v1) { Some(i) } else { None })
-        .collect();
-
-    let tris_with_v2: Vec<usize> = t
-        .triangle_vertices
-        .iter()
-        .enumerate()
-        .filter_map(|(i, verts)| if verts.contains(&v2) { Some(i) } else { None })
-        .collect();
-
-    // If any triangle contains both v1 and v2, the edge is already in the triangulation
-    for &tri in &tris_with_v1 {
-        if tris_with_v2.contains(&tri) {
-            return Some(vec![]);
-        }
-    }
-
-    // Start in the incident triangle entered by the segment. The first
-    // triangle found in storage is not necessarily on the v1-to-v2 ray.
-    let direction = [q[0] - p[0], q[1] - p[1]];
-    let near_v1 = [p[0] + direction[0] * 1.0e-8, p[1] + direction[1] * 1.0e-8];
-    let tp = tris_with_v1
-        .iter()
-        .copied()
-        .find(|&tri| {
-            let verts = t.triangle_vertices[tri];
-            point_in_triangle(
-                &near_v1,
-                &t.points[verts[0]],
-                &t.points[verts[1]],
-                &t.points[verts[2]],
-            ) != PointInTriangle::Outside
-        })
-        .or_else(|| tris_with_v1.first().copied())?;
-
-    let mut intersecting: Vec<(usize, usize)> = Vec::new();
-    let mut current = tp;
-    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    visited.insert(current);
-
-    let max_iterations = t.triangle_vertices.len() + 1;
-
-    for _iteration in 0..max_iterations {
-        // Check if we've reached a triangle containing v2
-        if t.triangle_vertices[current].contains(&v2) {
-            break;
-        }
-
-        // Check if q is inside/on the current triangle
-        let verts = t.triangle_vertices[current];
-        let pa = &t.points[verts[0]];
-        let pb = &t.points[verts[1]];
-        let pc = &t.points[verts[2]];
-        let loc = point_in_triangle(&q, pa, pb, pc);
-        if loc != PointInTriangle::Outside {
-            break;
-        }
-
-        // Try Case C: proper crossing
-        let result = check_proper_crossing(t, current, &p, &q, v1, v2, &visited);
-        if let Some((next_tri, Some(edge))) = result {
-            intersecting.push(edge);
-            current = next_tri;
-            visited.insert(current);
-            continue;
-        }
-        if let Some((next_tri, None)) = result {
-            current = next_tri;
-            visited.insert(current);
-            continue;
-        }
-
-        // Try Case A: collinear overlap
-        let result = check_collinear_overlap(t, current, &p, &q, &visited);
-        if let Some(next_tri) = result {
-            current = next_tri;
-            visited.insert(current);
-            continue;
-        }
-
-        // Try Case B: one endpoint collinear
-        let result = check_one_endpoint_collinear(t, current, &p, &q, &visited);
-        if let Some(next_tri) = result {
-            current = next_tri;
-            visited.insert(current);
-            continue;
-        }
-
+/// Internal segment walk seeded from the batch incidence map.
+fn find_intersecting_edges_from(
+    t: &Triangulation,
+    v1: usize,
+    v2: usize,
+    incidence: &IncidentMap,
+) -> Option<Vec<(usize, usize)>> {
+    if v1 == v2 || v1 >= t.points.len() || v2 >= t.points.len() {
         return None;
     }
+    let start = *incidence.triangles.get(v1)?;
+    if start == NO_NEIGHBOR {
+        return None;
+    }
+    let fan = vertex_fan_triangles(t, start, v1);
+    if fan
+        .iter()
+        .any(|&tri| t.triangle_vertices[tri].contains(&v2))
+    {
+        return Some(Vec::new());
+    }
 
-    Some(intersecting)
-}
+    let mut current = triangle_in_ray_wedge(t, &fan, v1, v2, &HashSet::new())?;
+    let mut entry_local = None;
+    let mut crossed = Vec::new();
+    let mut visited = HashSet::new();
 
-/// Case C: check for proper crossing in triangle current_tri
-/// Returns Some((next_tri, Option<edge>)) on success.
-/// Returns None when no valid crossing is found or the walk would leave the triangulation.
-fn check_proper_crossing(
-    t: &Triangulation,
-    current_tri: usize,
-    p: &Point,
-    q: &Point,
-    _v1: usize,
-    _v2: usize,
-    visited: &std::collections::HashSet<usize>,
-) -> Option<(usize, Option<(usize, usize)>)> {
-    let tri_verts = t.triangle_vertices[current_tri];
-    let a = &t.points[tri_verts[0]];
-    let b = &t.points[tri_verts[1]];
-    let c = &t.points[tri_verts[2]];
-
-    // edges: (start, end, opposite_vertex_local_idx, v_start_local, v_end_local)
-    let edges: [(&Point, &Point, usize, usize, usize); 3] = [
-        (a, b, 2, 0, 1), // edge v0-v1, opposite v2
-        (b, c, 0, 1, 2), // edge v1-v2, opposite v0
-        (c, a, 1, 2, 0), // edge v2-v0, opposite v1
-    ];
-
-    for (edge_start, edge_end, opp_local, _v_start_local, _v_end_local) in edges {
-        let pqs_orient = orient2d(p, q, edge_start);
-        let pqe_orient = orient2d(p, q, edge_end);
-
-        // Skip if any endpoint is collinear (handled by other cases)
-        if pqs_orient == 0.0 || pqe_orient == 0.0 {
-            continue;
+    while visited.insert(current) {
+        if t.triangle_vertices[current].contains(&v2) {
+            return Some(crossed);
         }
 
-        if !segments_intersect(p, q, edge_start, edge_end) {
-            continue;
-        }
-
-        // Check if q is on opposite side from the opposite vertex
-        let opp_point = &t.points[tri_verts[opp_local]];
-        let o_q = orient2d(edge_start, edge_end, q);
-        let o_opp = orient2d(edge_start, edge_end, opp_point);
-
-        if o_q * o_opp < 0.0 {
-            let neighbor_idx = t.triangle_neighbors[current_tri][opp_local];
-            if neighbor_idx == NO_NEIGHBOR {
-                return None;
-            }
-            if visited.contains(&neighbor_idx) {
+        let mut next = None;
+        for local in 0..3 {
+            // The segment entered through this edge, so only the other two
+            // edges can be exits from a non-degenerate triangle.
+            if entry_local == Some(local) {
                 continue;
             }
+            let handle = LocalEdge {
+                triangle: current,
+                local,
+            };
+            let (a, b) = handle.vertices(t);
+            let oa = orient2d(&t.points[v1], &t.points[v2], &t.points[a]);
+            let ob = orient2d(&t.points[v1], &t.points[v2], &t.points[b]);
 
-            return Some((neighbor_idx, Some((current_tri, neighbor_idx))));
+            if oa != 0.0 && ob != 0.0 && oa.signum() != ob.signum() {
+                let twin = handle.across(t)?;
+                crossed.push((current, twin.triangle));
+                next = Some((twin.triangle, Some(twin.local)));
+                break;
+            }
+
+            // Passing through a vertex does not cross an edge. Continue in the
+            // unique outgoing wedge of that vertex's triangle fan.
+            let through = if oa == 0.0
+                && point_strictly_between(&t.points[v1], &t.points[v2], &t.points[a])
+            {
+                Some(a)
+            } else if ob == 0.0
+                && point_strictly_between(&t.points[v1], &t.points[v2], &t.points[b])
+            {
+                Some(b)
+            } else {
+                None
+            };
+            if let Some(vertex) = through {
+                let fan_start = incidence.triangles[vertex];
+                let vertex_fan = vertex_fan_triangles(t, fan_start, vertex);
+                if let Some(triangle) = triangle_in_ray_wedge(t, &vertex_fan, vertex, v2, &visited)
+                {
+                    next = Some((triangle, None));
+                    break;
+                }
+            }
         }
-    }
 
+        let (triangle, entry) = next?;
+        current = triangle;
+        entry_local = entry;
+    }
     None
 }
 
-/// Case A: both edge endpoints are collinear with `pq`.
-///
-/// An overlapping triangulation edge is not a proper intersection, so it is
-/// not added to the result. Instead, continue from the endpoint farther along
-/// `p -> q` and select the triangle entered after that vertex.
-fn check_collinear_overlap(
-    t: &Triangulation,
-    current_tri: usize,
-    p: &Point,
-    q: &Point,
-    visited: &std::collections::HashSet<usize>,
-) -> Option<usize> {
-    let tri_verts = t.triangle_vertices[current_tri];
-    let pts = [
-        &t.points[tri_verts[0]],
-        &t.points[tri_verts[1]],
-        &t.points[tri_verts[2]],
-    ];
-
-    // edges: (local_start, local_end)
-    let edges = [(0usize, 1usize), (1, 2), (2, 0)];
-
-    for (ls, le) in edges {
-        let pqs = orient2d(p, q, pts[ls]);
-        let pqe = orient2d(p, q, pts[le]);
-
-        if pqs != 0.0 || pqe != 0.0 {
-            continue;
-        }
-
-        // Both endpoints collinear — check overlap
-        if !collinear_overlap(p, q, pts[ls], pts[le]) {
-            continue;
-        }
-        // The segment may follow this edge into a vertex shared by many
-        // triangles. Select the endpoint farther from p so the walk cannot
-        // turn backward along the overlapping edge.
-        let start_distance = (pts[ls][0] - p[0]).powi(2) + (pts[ls][1] - p[1]).powi(2);
-        let end_distance = (pts[le][0] - p[0]).powi(2) + (pts[le][1] - p[1]).powi(2);
-        let forward_vertex = if start_distance > end_distance {
-            tri_verts[ls]
-        } else {
-            tri_verts[le]
-        };
-        if let Some(next) = find_triangle_after_vertex(t, current_tri, forward_vertex, q, visited) {
-            return Some(next);
-        }
-    }
-
-    None
-}
-
-/// Find the triangle entered immediately after `vertex` on the ray toward `q`.
-///
-/// When a constraint passes exactly through an existing vertex, a normal edge
-/// crossing does not identify one unique neighbor: several triangles form a
-/// fan around the vertex. Choosing the first unvisited neighbor can enter the
-/// wrong side of that fan and make the segment walk stall.
-///
-/// This function probes a point just beyond `vertex` toward `q`, then performs
-/// a local breadth-first walk through triangles incident to `vertex`. The
-/// incident triangle containing the probe is the geometrically correct next
-/// triangle. Triangles already visited by the outer segment walk are excluded.
-fn find_triangle_after_vertex(
-    t: &Triangulation,
-    current_tri: usize,
-    vertex: usize,
-    q: &Point,
-    visited: &std::collections::HashSet<usize>,
-) -> Option<usize> {
-    let vertex_point = t.points[vertex];
-    // Move only far enough to disambiguate which wedge of the triangle fan
-    // contains the outgoing segment.
-    let probe = [
-        vertex_point[0] + (q[0] - vertex_point[0]) * 1.0e-8,
-        vertex_point[1] + (q[1] - vertex_point[1]) * 1.0e-8,
-    ];
-    let mut queue: VecDeque<usize> = t.triangle_neighbors[current_tri]
-        .iter()
-        .copied()
-        .filter(|&neighbor| neighbor != NO_NEIGHBOR)
-        .collect();
-    let mut fan_visited = std::collections::HashSet::from([current_tri]);
-
+/// Collects the connected triangle fan around one vertex without global scans.
+fn vertex_fan_triangles(t: &Triangulation, start: usize, vertex: usize) -> Vec<usize> {
+    let mut result = Vec::new();
+    let mut queue = VecDeque::from([start]);
+    let mut visited = HashSet::new();
     while let Some(triangle) = queue.pop_front() {
-        // `visited` belongs to the complete segment walk; `fan_visited` keeps
-        // this local breadth-first search from cycling around the vertex.
-        if visited.contains(&triangle) || !fan_visited.insert(triangle) {
-            continue;
-        }
-
-        let vertices = t.triangle_vertices[triangle];
-        // Restrict the BFS to the star/fan of the collinear vertex.
-        if !vertices.contains(&vertex) {
-            continue;
-        }
-
-        if point_in_triangle(
-            &probe,
-            &t.points[vertices[0]],
-            &t.points[vertices[1]],
-            &t.points[vertices[2]],
-        ) != PointInTriangle::Outside
+        if triangle == NO_NEIGHBOR
+            || !visited.insert(triangle)
+            || !t.triangle_vertices[triangle].contains(&vertex)
         {
-            return Some(triangle);
+            continue;
         }
-
-        // The probe is not in this wedge, so inspect adjacent wedges around
-        // the same vertex.
-        queue.extend(
-            t.triangle_neighbors[triangle]
-                .iter()
-                .copied()
-                .filter(|&neighbor| neighbor != NO_NEIGHBOR),
-        );
+        result.push(triangle);
+        queue.extend(t.triangle_neighbors[triangle].iter().copied());
     }
-
-    None
+    result
 }
 
-/// Case B: exactly one edge endpoint is collinear with `pq`.
+/// Selects the fan wedge entered by the ray `vertex -> target`.
 ///
-/// The segment passes through that endpoint, so continue through the local
-/// triangle fan in the direction of `q` rather than choosing an arbitrary
-/// neighbor incident to the vertex.
-fn check_one_endpoint_collinear(
+/// Rotate a CCW triangle to `[vertex,a,b]`. The ray is inside its closed wedge
+/// exactly when it is left of `vertex-a` and right of `vertex-b`. This sign
+/// test is scale-independent and therefore replaces the former epsilon probe.
+fn triangle_in_ray_wedge(
     t: &Triangulation,
-    current_tri: usize,
-    p: &Point,
-    q: &Point,
-    visited: &std::collections::HashSet<usize>,
+    fan: &[usize],
+    vertex: usize,
+    target: usize,
+    excluded: &HashSet<usize>,
 ) -> Option<usize> {
-    let tri_verts = t.triangle_vertices[current_tri];
-    let pts = [
-        &t.points[tri_verts[0]],
-        &t.points[tri_verts[1]],
-        &t.points[tri_verts[2]],
-    ];
-
-    let edges = [(0usize, 1usize), (1, 2), (2, 0)];
-
-    for (ls, le) in edges {
-        let pqs = orient2d(p, q, pts[ls]);
-        let pqe = orient2d(p, q, pts[le]);
-
-        // Only handle exactly one endpoint collinear
-        if (pqs == 0.0) == (pqe == 0.0) {
-            continue;
+    let p = &t.points[vertex];
+    let q = &t.points[target];
+    fan.iter().copied().find(|&triangle| {
+        if excluded.contains(&triangle) {
+            return false;
         }
-
-        let (collinear_pt, collinear_v) = if pqs == 0.0 {
-            (pts[ls], tri_verts[ls])
-        } else {
-            (pts[le], tri_verts[le])
+        let vertices = t.triangle_vertices[triangle];
+        let Some(local) = vertices.iter().position(|&v| v == vertex) else {
+            return false;
         };
-
-        // Check if the collinear point is within segment pq bounding box
-        if !point_in_segment_bbox(p, q, collinear_pt) {
-            continue;
-        }
-
-        // At a vertex, several triangles may meet the segment. Walk only
-        // through the local fan and select the triangle entered toward q.
-        if let Some(next) = find_triangle_after_vertex(t, current_tri, collinear_v, q, visited) {
-            return Some(next);
-        }
-    }
-
-    None
+        let a = &t.points[vertices[(local + 1) % 3]];
+        let b = &t.points[vertices[(local + 2) % 3]];
+        orient2d(p, a, q) >= 0.0 && orient2d(p, q, b) >= 0.0
+    })
 }
 
-/// Check if segment [a,b] and [c,d] overlap given they are all collinear.
-fn collinear_overlap(p: &Point, q: &Point, a: &Point, b: &Point) -> bool {
-    point_in_segment_bbox(p, q, a)
-        || point_in_segment_bbox(p, q, b)
-        || point_in_segment_bbox(a, b, p)
-        || point_in_segment_bbox(a, b, q)
+/// True when `p` is a non-endpoint point of the collinear segment `a-b`.
+fn point_strictly_between(a: &Point, b: &Point, p: &Point) -> bool {
+    point_in_segment_bbox(a, b, p) && *p != *a && *p != *b
 }
 
 /// Check if point p is in the bounding box of segment [a, b].
@@ -431,70 +429,208 @@ fn point_in_segment_bbox(a: &Point, b: &Point, p: &Point) -> bool {
     p[0] >= min_x - EPS && p[0] <= max_x + EPS && p[1] >= min_y - EPS && p[1] <= max_y + EPS
 }
 
+/// Diagonals created while removing a constraint corridor.
+struct RemovedEdges {
+    /// Current local owners of the new physical diagonals.
+    newly_created: Vec<LocalEdge>,
+}
+
+/// Removes crossed edges with an incrementally updated queue.
+///
+/// `Q` owns physical edge keys, so a queued edge remains identifiable when a
+/// neighboring flip moves it to another triangle slot. `handles` maps those
+/// keys back to their current local owner. A flip refreshes this map by looking
+/// only at the six slots of its two rewritten triangles. `queued` guarantees
+/// that every physical edge has at most one live queue entry.
+fn remove_intersecting_edges_local(
+    t: &mut Triangulation,
+    v1: usize,
+    v2: usize,
+    edges: Vec<(usize, usize)>,
+    work: &mut ConstraintWorkspace,
+) -> Option<RemovedEdges> {
+    if edges.is_empty() {
+        return Some(RemovedEdges {
+            newly_created: Vec::new(),
+        });
+    }
+    work.begin_phase();
+    let p = t.points[v1];
+    let q = t.points[v2];
+    let target = Triangulation::edge_key(v1, v2);
+    let mut new_edges = Vec::new();
+    work.sides.insert(v1, 0);
+    work.sides.insert(v2, 0);
+    for (ta, tb) in edges {
+        let h = local_edge_between(t, ta, tb)?;
+        let key = edge_key(t, h);
+        work.handles.insert(key, h);
+        work.sides
+            .entry(key.0)
+            .or_insert_with(|| orientation_side(&p, &q, &t.points[key.0]));
+        work.sides
+            .entry(key.1)
+            .or_insert_with(|| orientation_side(&p, &q, &t.points[key.1]));
+        work.enqueue(key);
+    }
+    let mut flips = 0;
+    let mut deferred = 0;
+    let limit = t.triangle_vertices.len().saturating_mul(32).max(32);
+    while let Some(key) = work.pop() {
+        let h = *work.handles.get(&key)?;
+        if edge_key(t, h) != key {
+            return None;
+        }
+        if !local_quadrilateral_is_convex(t, h) {
+            work.enqueue(key);
+            deferred += 1;
+            if deferred >= work.queue.len() {
+                return None;
+            }
+            continue;
+        }
+        let changed = [h.triangle, h.neighbor(t)?];
+        let f = flip_designated_edge(t, h)?;
+        work.incidence.refresh(t, changed);
+        debug_assert_eq!(f.diagonal.across(t), Some(f.diagonal_twin));
+        flips += 1;
+        deferred = 0;
+        if flips > limit {
+            return None;
+        }
+        refresh_local_handles(t, changed, &mut work.handles);
+        let nk = edge_key(t, f.diagonal);
+        work.handles.insert(nk, f.diagonal);
+        if nk == target {
+            return Some(resolve_removed(new_edges, &work.handles));
+        }
+        if flipped_edge_crosses_constraint(t, v1, v2, nk, &mut work.sides) {
+            work.enqueue(nk)
+        } else {
+            new_edges.push(nk)
+        }
+    }
+    Some(resolve_removed(new_edges, &work.handles))
+}
+/// Resolves stable new-edge keys to their current local handles.
+fn resolve_removed(
+    keys: Vec<(usize, usize)>,
+    handles: &HashMap<(usize, usize), LocalEdge>,
+) -> RemovedEdges {
+    RemovedEdges {
+        newly_created: keys
+            .into_iter()
+            .filter_map(|key| handles.get(&key).copied())
+            .collect(),
+    }
+}
+/// Removes intersecting edges while preserving the historical public result.
 pub fn remove_intersecting_edges(
     t: &mut Triangulation,
     v1: usize,
     v2: usize,
     edges: Vec<(usize, usize)>,
 ) -> Option<Vec<(usize, usize)>> {
-    if edges.is_empty() {
-        return Some(vec![]);
-    }
+    let mut work = ConstraintWorkspace::new(t);
+    remove_intersecting_edges_local(t, v1, v2, edges, &mut work).map(|r| {
+        r.newly_created
+            .into_iter()
+            .map(|h| edge_key(t, h))
+            .collect()
+    })
+}
 
-    let p = t.points[v1];
-    let q = t.points[v2];
-    let constraint_edge = Triangulation::edge_key(v1, v2);
-    let mut newly_created = Vec::new();
-    let max_iterations = edges.len().max(1) * 10;
-
-    let mut intersecting: VecDeque<(usize, usize)> = edges.into();
-
-    for _ in 0..max_iterations {
-        let Some((tri_a, tri_b)) = intersecting.pop_front() else {
-            break;
-        };
-
-        let mut candidate = Some((tri_a, tri_b));
-        while let Some((cand_a, cand_b)) = candidate {
-            if is_quadrilateral_convex(t, cand_a, cand_b) {
-                swap_diagonal(t, cand_a, cand_b);
-
-                let (new_v1, new_v2) = find_shared_edge(t, cand_a, cand_b)?;
-                let new_edge = Triangulation::edge_key(new_v1, new_v2);
-                if new_edge == constraint_edge {
-                    return Some(newly_created);
-                }
-
-                if !segments_intersect(&p, &q, &t.points[new_edge.0], &t.points[new_edge.1]) {
-                    newly_created.push(new_edge);
-                }
-
-                candidate = None;
-                break;
+/// Classifies a post-flip diagonal with at most one new orientation predicate.
+///
+/// The initial corridor labels every crossed-edge endpoint as left (`+`) or
+/// right (`-`) of the directed constraint. A convex flip exposes one previously
+/// labelled endpoint of the new diagonal and normally one new endpoint. The
+/// four non-degenerate configurations are therefore:
+///
+/// | first side | second side | owner |
+/// |------------|-------------|-------|
+/// | left       | left        | `N`   |
+/// | left       | right       | `Q`   |
+/// | right      | left        | `Q`   |
+/// | right      | right       | `N`   |
+///
+/// Only the missing side is evaluated. Zero sides and a layout where neither
+/// endpoint was labelled are outside this combinatorial truth table and use the
+/// safe full segment-intersection predicate.
+fn flipped_edge_crosses_constraint(
+    t: &Triangulation,
+    v1: usize,
+    v2: usize,
+    diagonal: (usize, usize),
+    sides: &mut HashMap<usize, i8>,
+) -> bool {
+    let p = &t.points[v1];
+    let q = &t.points[v2];
+    let known_a = sides.get(&diagonal.0).copied();
+    let known_b = sides.get(&diagonal.1).copied();
+    let optimized = match (known_a, known_b) {
+        (Some(a), Some(b)) if a != 0 && b != 0 => a != b,
+        (Some(a), None) if a != 0 => {
+            let b = orientation_side(p, q, &t.points[diagonal.1]);
+            sides.insert(diagonal.1, b);
+            if b == 0 {
+                segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1])
+            } else {
+                a != b
             }
-
-            candidate = intersecting.pop_front();
         }
-
-        if candidate.is_some() {
-            return None;
-        }
-
-        // A diagonal flip changes the local topology. Walk the updated
-        // triangulation from v1 toward v2 instead of rescanning every edge.
-        intersecting = match find_intersecting_edges(t, v1, v2) {
-            Some(edges) => edges.into(),
-            None => {
-                return None;
+        (None, Some(b)) if b != 0 => {
+            let a = orientation_side(p, q, &t.points[diagonal.0]);
+            sides.insert(diagonal.0, a);
+            if a == 0 {
+                segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1])
+            } else {
+                a != b
             }
-        };
-    }
+        }
+        _ => segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1]),
+    };
+    debug_assert_eq!(
+        optimized,
+        segments_intersect(p, q, &t.points[diagonal.0], &t.points[diagonal.1]),
+        "one-orientation flip classification disagrees with full predicate"
+    );
+    optimized
+}
 
-    if !find_intersecting_edges(t, v1, v2)?.is_empty() {
-        return None;
+/// Converts an exact orientation determinant to its combinatorial side label.
+fn orientation_side(a: &Point, b: &Point, p: &Point) -> i8 {
+    let determinant = orient2d(a, b, p);
+    if determinant > 0.0 {
+        1
+    } else if determinant < 0.0 {
+        -1
+    } else {
+        0
     }
+}
 
-    Some(newly_created)
+/// Returns a local edge's normalized physical vertex pair.
+fn edge_key(t: &Triangulation, edge: LocalEdge) -> (usize, usize) {
+    let (a, b) = edge.vertices(t);
+    Triangulation::edge_key(a, b)
+}
+
+/// Refreshes tracked local owners from a constant-size rewritten neighborhood.
+fn refresh_local_handles(
+    t: &Triangulation,
+    triangles: [usize; 2],
+    handles: &mut HashMap<(usize, usize), LocalEdge>,
+) {
+    for triangle in triangles {
+        for local in 0..3 {
+            let handle = LocalEdge { triangle, local };
+            let key = edge_key(t, handle);
+            if handles.contains_key(&key) {
+                handles.insert(key, handle);
+            }
+        }
+    }
 }
 
 pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (usize, usize) {
@@ -515,99 +651,207 @@ pub fn find_triangles_sharing_edge(t: &Triangulation, v1: usize, v2: usize) -> (
     (first, second)
 }
 
+/// Restores Delaunay legality using only handles produced by insertion.
+///
+/// `N` owns stable physical keys while `handles` records their current slots.
+/// A flip refreshes tracked boundary owners from its two rewritten triangles;
+/// no global scan rediscovers an edge. Constrained edges are never flipped.
 fn restore_delaunay_edges(
     t: &mut Triangulation,
-    mut edges: Vec<(usize, usize)>,
-    constraint_edge: (usize, usize),
+    edges: Vec<LocalEdge>,
+    work: &mut ConstraintWorkspace,
 ) -> bool {
-    if edges.is_empty() {
-        return true;
+    work.begin_phase();
+    for h in edges {
+        let key = edge_key(t, h);
+        work.handles.insert(key, h);
+        work.enqueue(key);
     }
-
-    let max_iterations = edges.len().max(1) * 10;
-
-    for _ in 0..max_iterations {
-        let mut swapped = false;
-        let mut next_edges = Vec::with_capacity(edges.len());
-
-        for (vk, vl) in edges {
-            let edge = Triangulation::edge_key(vk, vl);
-            if edge == constraint_edge {
-                next_edges.push(edge);
-                continue;
-            }
-
-            let (tri_a, tri_b) = find_triangles_sharing_edge(t, edge.0, edge.1);
-            if tri_a == NO_NEIGHBOR || tri_b == NO_NEIGHBOR {
-                next_edges.push(edge);
-                continue;
-            }
-
-            if !is_quadrilateral_convex(t, tri_a, tri_b) {
-                next_edges.push(edge);
-                continue;
-            }
-
-            let tri_a_verts = t.triangle_vertices[tri_a];
-            let tri_b_verts = t.triangle_vertices[tri_b];
-            let vn = tri_b_verts
-                .iter()
-                .copied()
-                .find(|&vertex| vertex != edge.0 && vertex != edge.1)
-                .expect("neighbor triangle must have one opposite vertex");
-
-            let a = t.points[tri_a_verts[0]];
-            let b = t.points[tri_a_verts[1]];
-            let c = t.points[tri_a_verts[2]];
-            let d = t.points[vn];
-
-            if incircle(&a, &b, &c, &d) > 0.0 {
-                swap_diagonal(t, tri_a, tri_b);
-                let Some((new_v1, new_v2)) = find_shared_edge(t, tri_a, tri_b) else {
-                    return false;
-                };
-                next_edges.push(Triangulation::edge_key(new_v1, new_v2));
-                swapped = true;
-            } else {
-                next_edges.push(edge);
-            }
+    let mut flips = 0;
+    let limit = t.triangle_vertices.len().saturating_mul(32).max(32);
+    while let Some(key) = work.pop() {
+        if t.constrained_edges.contains(&key) {
+            continue;
         }
-
-        edges = next_edges;
-        if !swapped {
-            return true;
-        }
-    }
-
-    false
-}
-
-pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) -> bool {
-    for &(v1, v2) in constraints {
-        let constraint_edge = Triangulation::edge_key(v1, v2);
-        let Some(intersecting) = find_intersecting_edges(t, v1, v2) else {
+        let Some(h) = work.handles.get(&key).copied() else {
             return false;
         };
-
-        let newly_created = if intersecting.is_empty() {
-            Vec::new()
-        } else {
-            let Some(newly_created) = remove_intersecting_edges(t, v1, v2, intersecting) else {
-                return false;
-            };
-            newly_created
+        if edge_key(t, h) != key {
+            return false;
+        }
+        let Some(twin) = h.across(t) else { continue };
+        if !local_quadrilateral_is_convex(t, h) {
+            continue;
+        }
+        let v = t.triangle_vertices[h.triangle];
+        if incircle(
+            &t.points[v[0]],
+            &t.points[v[1]],
+            &t.points[v[2]],
+            &t.points[twin.opposite(t)],
+        ) <= 0.0
+        {
+            continue;
+        }
+        let changed = [h.triangle, twin.triangle];
+        let Some(f) = flip_designated_edge(t, h) else {
+            return false;
         };
-
-        t.constrained_edges.insert(constraint_edge);
-
-        if !restore_delaunay_edges(t, newly_created, constraint_edge) {
+        work.incidence.refresh(t, changed);
+        refresh_local_handles(t, changed, &mut work.handles);
+        let nk = edge_key(t, f.diagonal);
+        work.handles.insert(nk, f.diagonal);
+        if !t.constrained_edges.contains(&nk) {
+            work.enqueue(nk)
+        }
+        flips += 1;
+        if flips > limit {
             return false;
         }
     }
-
     true
 }
 
+/// Adds constraints, representing every logical segment by physical subedges.
+pub fn add_constraints(t: &mut Triangulation, constraints: &[(usize, usize)]) -> bool {
+    let mut work = ConstraintWorkspace::new(t);
+    for &(v1, v2) in constraints {
+        let Some(chain) = constraint_vertex_chain(t, v1, v2) else {
+            return false;
+        };
+        match preflight_constraint(t, &chain) {
+            Preflight::Insert => {}
+            Preflight::Duplicate => continue,
+            Preflight::Reject => return false,
+        }
+        for endpoints in chain.windows(2) {
+            if !insert_constraint_subedge(t, endpoints[0], endpoints[1], &mut work) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Result of checking one logical constraint against existing constrained edges.
+enum Preflight {
+    Insert,
+    Duplicate,
+    Reject,
+}
+
+/// Validates unsupported interactions before any topology mutation.
+///
+/// A chain is an idempotent duplicate only when every one of its physical
+/// subedges is already constrained. Sharing just part of a chain is a partial
+/// overlap and is rejected, as are proper crossings and a requested endpoint
+/// in the interior of an existing constrained edge (which would require edge
+/// splitting and stable constraint identities not provided by the current API).
+fn preflight_constraint(t: &Triangulation, chain: &[usize]) -> Preflight {
+    let requested: Vec<_> = chain
+        .windows(2)
+        .map(|vertices| Triangulation::edge_key(vertices[0], vertices[1]))
+        .collect();
+    if requested
+        .iter()
+        .all(|edge| t.constrained_edges.contains(edge))
+    {
+        return Preflight::Duplicate;
+    }
+
+    for &candidate in &requested {
+        if t.constrained_edges.contains(&candidate) {
+            return Preflight::Reject;
+        }
+        let a = &t.points[candidate.0];
+        let b = &t.points[candidate.1];
+        for &existing in &t.constrained_edges {
+            let c = &t.points[existing.0];
+            let d = &t.points[existing.1];
+            if segments_intersect(a, b, c, d)
+                || collinear_positive_overlap(a, b, c, d)
+                || point_strictly_between(c, d, a)
+                || point_strictly_between(c, d, b)
+            {
+                return Preflight::Reject;
+            }
+        }
+    }
+    Preflight::Insert
+}
+
+/// Tests whether two collinear closed segments share positive length.
+fn collinear_positive_overlap(a: &Point, b: &Point, c: &Point, d: &Point) -> bool {
+    if orient2d(a, b, c) != 0.0 || orient2d(a, b, d) != 0.0 {
+        return false;
+    }
+    let use_x = (b[0] - a[0]).abs() >= (b[1] - a[1]).abs();
+    let coordinate = |point: &Point| if use_x { point[0] } else { point[1] };
+    let left = coordinate(a)
+        .min(coordinate(b))
+        .max(coordinate(c).min(coordinate(d)));
+    let right = coordinate(a)
+        .max(coordinate(b))
+        .min(coordinate(c).max(coordinate(d)));
+    left < right
+}
+
+/// Inserts one subedge whose open segment contains no triangulation vertex.
+fn insert_constraint_subedge(
+    t: &mut Triangulation,
+    v1: usize,
+    v2: usize,
+    work: &mut ConstraintWorkspace,
+) -> bool {
+    let constraint_edge = Triangulation::edge_key(v1, v2);
+    let Some(intersecting) = find_intersecting_edges_from(t, v1, v2, &work.incidence) else {
+        return false;
+    };
+    let newly_created = if intersecting.is_empty() {
+        RemovedEdges {
+            newly_created: Vec::new(),
+        }
+    } else {
+        let Some(removed) = remove_intersecting_edges_local(t, v1, v2, intersecting, work) else {
+            return false;
+        };
+        removed
+    };
+    t.constrained_edges.insert(constraint_edge);
+    restore_delaunay_edges(t, newly_created.newly_created, work)
+}
+
+/// Returns all existing vertices on a segment in endpoint-to-endpoint order.
+///
+/// This point pass is performed before topology mutation. Consecutive entries
+/// define the real constrained edges, avoiding a non-physical logical edge when
+/// the segment passes through an existing vertex.
+fn constraint_vertex_chain(t: &Triangulation, v1: usize, v2: usize) -> Option<Vec<usize>> {
+    let (p, q) = (*t.points.get(v1)?, *t.points.get(v2)?);
+    if v1 == v2 {
+        return None;
+    }
+    let dx = q[0] - p[0];
+    let dy = q[1] - p[1];
+    let denominator = dx * dx + dy * dy;
+    if denominator == 0.0 {
+        return None;
+    }
+    let mut vertices: Vec<(f64, usize)> = t
+        .points
+        .iter()
+        .enumerate()
+        .filter_map(|(vertex, point)| {
+            if orient2d(&p, &q, point) != 0.0 || !point_in_segment_bbox(&p, &q, point) {
+                return None;
+            }
+            let parameter = ((point[0] - p[0]) * dx + (point[1] - p[1]) * dy) / denominator;
+            Some((parameter, vertex))
+        })
+        .collect();
+    vertices.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Some(vertices.into_iter().map(|(_, vertex)| vertex).collect())
+}
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -755,6 +999,134 @@ mod tests {
             .iter()
             .position(|&candidate| candidate == point)
             .expect("point must exist in triangulation")
+    }
+
+    #[test]
+    fn local_edge_rotation_mapping_and_flip() {
+        let mut t = two_tri_quad();
+        let edge = local_edge_between(&t, 0, 1).expect("triangles are adjacent");
+        assert_eq!(edge.vertices(&t), (2, 0));
+        assert_eq!(edge.opposite(&t), 1);
+        assert_eq!(edge.next().opposite(&t), 2);
+        assert_eq!(edge.across(&t).unwrap().across(&t), Some(edge));
+
+        let flipped = flip_designated_edge(&mut t, edge).expect("square is flippable");
+        assert_eq!(
+            Triangulation::edge_key(
+                flipped.diagonal.vertices(&t).0,
+                flipped.diagonal.vertices(&t).1
+            ),
+            (1, 3)
+        );
+        assert_eq!(flipped.diagonal.across(&t), Some(flipped.diagonal_twin));
+        assert_neighbors_consistent(&t);
+    }
+
+    #[test]
+    fn queue_generations_have_single_owner_and_reuse_storage() {
+        let t = two_tri_quad();
+        let mut work = ConstraintWorkspace::new(&t);
+        work.begin_phase();
+        work.enqueue((2, 5));
+        work.enqueue((2, 5));
+        assert_eq!(work.queue.len(), 1);
+        let capacity = work.queue.capacity();
+        work.begin_phase();
+        work.enqueue((2, 5));
+        assert_eq!(work.queue.len(), 1);
+        assert!(work.queue.capacity() >= capacity);
+    }
+
+    #[test]
+    fn restoration_never_flips_a_constrained_handle() {
+        let mut t = two_tri_quad();
+        let handle = local_edge_between(&t, 0, 1).unwrap();
+        let key = edge_key(&t, handle);
+        t.constrained_edges.insert(key);
+        let before = t.triangle_vertices.clone();
+        let mut work = ConstraintWorkspace::new(&t);
+        assert!(restore_delaunay_edges(&mut t, vec![handle], &mut work));
+        assert_eq!(t.triangle_vertices, before);
+    }
+
+    #[test]
+    fn incidence_map_is_maintained_after_flip() {
+        let mut t = two_tri_quad();
+        let mut incidence = IncidentMap::new(&t);
+        let edge = local_edge_between(&t, 0, 1).unwrap();
+        flip_designated_edge(&mut t, edge).unwrap();
+        incidence.refresh(&t, [0, 1]);
+        for vertex in 0..t.points.len() {
+            assert!(t.triangle_vertices[incidence.triangles[vertex]].contains(&vertex));
+        }
+    }
+
+    #[test]
+    fn flipped_edge_four_configuration_truth_table() {
+        let mut t = Triangulation::new();
+        t.points = vec![
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [1.0, 1.0],
+            [3.0, 1.0],
+            [1.0, -1.0],
+            [3.0, -1.0],
+        ];
+        let cases = [
+            ((2, 3), false),
+            ((2, 4), true),
+            ((4, 2), true),
+            ((4, 5), false),
+        ];
+        for (diagonal, expected) in cases {
+            let mut sides = HashMap::from([
+                (
+                    diagonal.0,
+                    orientation_side(&t.points[0], &t.points[1], &t.points[diagonal.0]),
+                ),
+                (
+                    diagonal.1,
+                    orientation_side(&t.points[0], &t.points[1], &t.points[diagonal.1]),
+                ),
+            ]);
+            assert_eq!(
+                flipped_edge_crosses_constraint(&t, 0, 1, diagonal, &mut sides),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_crossing_leaves_requested_constraint_unmodified() {
+        let points = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let mut t = triangulate(&points);
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        let vertices = t.triangle_vertices.clone();
+        let neighbors = t.triangle_neighbors.clone();
+        let constrained = t.constrained_edges.clone();
+        assert!(!add_constraints(&mut t, &[(1, 3)]));
+        assert_eq!(t.triangle_vertices, vertices);
+        assert_eq!(t.triangle_neighbors, neighbors);
+        assert_eq!(t.constrained_edges, constrained);
+    }
+
+    #[test]
+    fn duplicate_chain_is_idempotent_and_partial_overlap_is_rejected() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [0.0, 1.0],
+            [3.0, 1.0],
+        ];
+        let mut t = triangulate(&points);
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        let before = t.constrained_edges.clone();
+        assert!(add_constraints(&mut t, &[(0, 2)]));
+        assert_eq!(t.constrained_edges, before);
+        assert!(!add_constraints(&mut t, &[(1, 3)]));
+        assert_eq!(t.constrained_edges, before);
     }
 
     #[test]
