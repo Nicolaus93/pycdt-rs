@@ -112,14 +112,48 @@ pub fn remove_super_triangle(t: &mut Triangulation) {
     t.num_super_triangle_points = 0;
 }
 
+fn spread_bits_16(mut value: u32) -> u32 {
+    value &= 0x0000_ffff;
+    value = (value | (value << 8)) & 0x00ff_00ff;
+    value = (value | (value << 4)) & 0x0f0f_0f0f;
+    value = (value | (value << 2)) & 0x3333_3333;
+    value = (value | (value << 1)) & 0x5555_5555;
+    value
+}
+
+fn morton_key(point: &Point, min: &Point, max: &Point) -> u32 {
+    let quantize = |value: f64, low: f64, high: f64| {
+        if high == low {
+            0
+        } else {
+            (((value - low) / (high - low)).clamp(0.0, 1.0) * 65_535.0) as u32
+        }
+    };
+    let x = quantize(point[0], min[0], max[0]);
+    let y = quantize(point[1], min[1], max[1]);
+    spread_bits_16(x) | (spread_bits_16(y) << 1)
+}
+
 pub fn triangulate(input_points: &[[f64; 2]]) -> Triangulation {
     let mut t = initialize_triangulation(input_points);
     let mut legalization_stack = Vec::new();
     let mut start_triangle = 0;
+    t.points.extend_from_slice(input_points);
 
-    for &point in input_points {
-        t.points.push(point);
-        let point_idx = t.points.len() - 1;
+    let min = input_points.iter().fold([f64::INFINITY; 2], |min, point| {
+        [min[0].min(point[0]), min[1].min(point[1])]
+    });
+    let max = input_points
+        .iter()
+        .fold([f64::NEG_INFINITY; 2], |max, point| {
+            [max[0].max(point[0]), max[1].max(point[1])]
+        });
+    let mut insertion_order: Vec<usize> = (3..t.points.len()).collect();
+    insertion_order.sort_unstable_by_key(|&point_idx| {
+        (morton_key(&t.points[point_idx], &min, &max), point_idx)
+    });
+
+    for point_idx in insertion_order {
         start_triangle =
             insert_point_from(&mut t, point_idx, start_triangle, &mut legalization_stack);
     }
