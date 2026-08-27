@@ -84,21 +84,19 @@ pub fn swap_diagonal(t: &mut Triangulation, tri_a: usize, tri_b: usize) {
     let va = t.triangle_vertices[tri_a];
     let vb = t.triangle_vertices[tri_b];
 
-    // Shared vertices
-    let shared: Vec<usize> = va.iter().copied().filter(|v| vb.contains(v)).collect();
-    assert_eq!(
-        shared.len(),
-        2,
-        "swap_diagonal: triangles must share exactly one edge"
-    );
-    let (a, b) = (shared[0], shared[1]);
-
-    // Opposite vertices
-    let point_idx = va
+    // The one vertex from tri_a absent from tri_b identifies both the
+    // inserted point and the two shared vertices without allocating.
+    let point_pos = va
         .iter()
-        .copied()
-        .find(|&v| v != a && v != b)
-        .expect("invariant: triangle A must contain an opposite vertex");
+        .position(|vertex| !vb.contains(vertex))
+        .expect("swap_diagonal: triangles must share exactly one edge");
+    let point_idx = va[point_pos];
+    let (a, b, pos_a_in_a, pos_b_in_a) = match point_pos {
+        0 => (va[1], va[2], 1, 2),
+        1 => (va[0], va[2], 0, 2),
+        2 => (va[0], va[1], 0, 1),
+        _ => unreachable!(),
+    };
     let c = vb
         .iter()
         .copied()
@@ -106,17 +104,8 @@ pub fn swap_diagonal(t: &mut Triangulation, tri_a: usize, tri_b: usize) {
         .expect("invariant: triangle B must contain an opposite vertex");
 
     // Old neighbors (neighbor[i] is opposite vertex[i])
-    let pos_a_in_a = va
-        .iter()
-        .position(|&v| v == a)
-        .expect("invariant: shared vertex a must exist in triangle A");
-    let pos_b_in_a = va
-        .iter()
-        .position(|&v| v == b)
-        .expect("invariant: shared vertex b must exist in triangle A");
-    let t6 = t.triangle_neighbors[tri_a][pos_a_in_a]; // opposite a in tri_a
-    let t5 = t.triangle_neighbors[tri_a][pos_b_in_a]; // opposite b in tri_a
-
+    let t6 = t.triangle_neighbors[tri_a][pos_a_in_a];
+    let t5 = t.triangle_neighbors[tri_a][pos_b_in_a];
     let pos_a_in_b = vb
         .iter()
         .position(|&v| v == a)

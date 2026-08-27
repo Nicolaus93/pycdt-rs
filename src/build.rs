@@ -161,18 +161,12 @@ pub fn find_containing_triangle_from(
             // is therefore left of each directed edge, so a negative sign alone
             // identifies an exit edge; no triangle-orientation predicate is needed.
             if edge_orientation < 0.0 {
-                let neighbor = t.triangle_neighbors[current]
-                    .iter()
-                    .copied()
-                    .filter(|&neighbor| neighbor != NO_NEIGHBOR)
-                    .find(|&neighbor| {
-                        let neighbor_vertices = t.triangle_vertices[neighbor];
-                        neighbor_vertices.contains(&edge_start)
-                            && neighbor_vertices.contains(&edge_end)
-                    });
-                let Some(neighbor) = neighbor else {
+                // Neighbor slot i is across the edge opposite vertices[i],
+                // exactly the exit edge selected by opposite_vertex.
+                let neighbor = t.triangle_neighbors[current][opposite_vertex];
+                if neighbor == NO_NEIGHBOR {
                     return PointLocation::NotFound;
-                };
+                }
                 next = Some(neighbor);
                 break;
             }
@@ -731,7 +725,7 @@ mod tests {
         Triangulation {
             points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             triangle_vertices: vec![[0, 1, 2], [0, 2, 3]],
-            triangle_neighbors: vec![[NO_NEIGHBOR, NO_NEIGHBOR, 1], [0, NO_NEIGHBOR, NO_NEIGHBOR]],
+            triangle_neighbors: vec![[NO_NEIGHBOR, 1, NO_NEIGHBOR], [NO_NEIGHBOR, NO_NEIGHBOR, 0]],
             constrained_edges: Default::default(),
             num_super_triangle_points: 0,
         }
